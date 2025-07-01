@@ -1,5 +1,14 @@
 model:
-
+  name: Vit
+  dim: 768
+  depth: 12
+  heads: 12
+  mlp_dim: 768
+  dim_head: 64
+  dropout: 0.
+  emb_dropout: 0.
+  patch_height: 4
+  patch_width: 100
 
 
 data:
@@ -13,8 +22,8 @@ train:
   num_workers: 4
   num_epochs: 100
   lr: 0.001
-  height: 31
-  width: 360
+  height: 32
+  width: 900
   num_classes: 6
   channels: 1
   lr_scheduler:

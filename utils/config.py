@@ -24,6 +24,28 @@ def get_config(config_path: str):
     return config["model"], config["data"], config["train"]
 
 
+def get_model(config, channels, num_classes, height, width):
+    if config["name"] == "RDNet":
+        from frame_wise.models.cnn import RDNet
+        return RDNet(channels=channels, num_classes=num_classes)
+    elif config["name"] == "Vit":
+        from frame_wise.models.vit import ViT
+        dim          = config["dim"]
+        depth        = config["depth"]
+        heads        = config["heads"]
+        mlp_dim      = config["mlp_dim"]
+        dim_head     = config["dim_head"]
+        dropout      = config["dropout"]
+        emb_dropout  = config["emb_dropout"]
+        patch_height = config["patch_height"]
+        patch_width  = config["patch_width"]
+        return ViT(in_channels=channels, num_classes=num_classes, image_size=(height, width),
+                   patch_size=(patch_height, patch_width), dim=dim, depth=depth, heads=heads,
+                   mlp_dim=mlp_dim, dim_head=dim_head, dropout=dropout, emb_dropout=emb_dropout)
+    else:
+        raise NotImplementedError(f"Model {config['name']} not implemented")
+
+
 def get_optimizer(config, model, lr):
     if config['name'] == 'Adam':
         weight_decay = config['weight_decay']

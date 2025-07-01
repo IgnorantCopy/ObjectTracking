@@ -1,73 +1,90 @@
 import argparse
 import os
+import time
 from datetime import datetime
-import tqdm
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 
 from utils import config, dataset
-from model import RDNet
-
 
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path",        type=str,   default='../configs/frame_wise.yaml',   help="path to config file")
-    parser.add_argument("--log-path",           type=str,   default="./logs",                       help="path to log file")
-    parser.add_argument("--resume",             type=str,   default=None,                           help="path to checkpoint file")
-    parser.add_argument("--device",             type=str,   default="cuda",                         help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--config-path", type=str, default='../configs/frame_wise/vit.yaml', help="path to config file")
+    parser.add_argument("--log-path",    type=str, default="./logs",                         help="path to log file")
+    parser.add_argument("--resume",      type=str, default=None,                             help="path to checkpoint file")
+    parser.add_argument("--device",      type=str, default="cuda",                           help="device to use", choices=["cuda", "cpu"])
     args = parser.parse_args()
     print(args)
     return args
 
 
+def cal_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 def main():
     args = config_parser()
-    config_path     = args.config_path
-    log_path        = args.log_path
-    resume          = args.resume
-    device          = args.device
+    config_path = args.config_path
+    log_path    = args.log_path
+    resume      = args.resume
+    device      = args.device
 
+    log_path = os.path.join(log_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
     config.check_paths(config_path, log_path, resume)
-    logger = SummaryWriter(os.path.join(log_path, datetime.now().strftime("%Y%m%d-%H%M%S")))
+    writer = SummaryWriter(log_dir=log_path)
+    logger = open(os.path.join(log_path, "train.txt"), "w")
     model_config, data_config, train_config = config.get_config(config_path)
 
     data_root   = data_config['data_root']
     val_ratio   = data_config['val_ratio']
     shuffle     = data_config['shuffle']
 
-    batch_size      = train_config['batch_size']
-    num_workers     = train_config['num_workers']
-    epochs          = train_config['num_epochs']
-    lr              = train_config['lr']
-    momentum        = train_config['momentum']
-    weight_decay    = train_config['weight_decay']
-    channels        = train_config['channels']
-    num_classes     = train_config['num_classes']
-    height          = train_config['height']
-    width           = train_config['width']
-    lr_config       = train_config['lr_scheduler']
-    optimizer_config= train_config['optimizer']
-    loss_config     = train_config['loss']
+    batch_size       = train_config['batch_size']
+    num_workers      = train_config['num_workers']
+    epochs           = train_config['num_epochs']
+    lr               = train_config['lr']
+    num_classes      = train_config['num_classes']
+    channels         = train_config['channels']
+    height           = train_config['height']
+    width            = train_config['width']
+    lr_config        = train_config['lr_scheduler']
+    optimizer_config = train_config['optimizer']
+    loss_config      = train_config['loss']
 
     start_epoch = 0
     best_acc = 0.
-    model = RDNet(channels=channels, num_classes=num_classes)
+    model = config.get_model(model_config, channels, num_classes, height, width)
+    optimizer = config.get_optimizer(optimizer_config, model, lr)
+    lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
+    criterion = config.get_criterion(loss_config)
+
+    print(f"Model has {cal_params(model) / 1024 ** 2:.2f}MB parameters.")
+    logger.write(f"Model has {cal_params(model) / 1024 ** 2:.2f}MB parameters.\n")
     if resume:
         checkpoint = torch.load(resume)
         model.load_state_dict(checkpoint['state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         start_epoch = checkpoint['epoch']
         best_acc = checkpoint['best_acc']
         print(f"Loaded checkpoint from {resume}")
     model.to(device)
 
     train_transform = transforms.Compose([
-
+        transforms.Resize((height, width)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5 for _ in range(channels)],
+                             std=[0.5 for _ in range(channels)]),
     ])
     val_transform = transforms.Compose([
-
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5 for _ in range(channels)],
+                             std=[0.5 for _ in range(channels)]),
     ])
     train_paths, val_paths = dataset.split_train_val(data_root, val_ratio, shuffle)
     train_dataset = dataset.RDMap(train_paths, transform=train_transform)
@@ -75,8 +92,82 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
 
-    optimizer = config.get_optimizer(optimizer_config, model, lr)
-    lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
-    criterion = config.get_criterion(loss_config)
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        train_loss = 0.
+        train_time = time.time()
+        totals = np.array([0 for _ in range(num_classes)])
+        corrects = np.array([0 for _ in range(num_classes)])
+        for i, (image, label) in enumerate(train_loader):
+            image = image.to(device)
+            label = label.to(device)
+            optimizer.zero_grad()
+            output = model(image)
+            loss = criterion(output, label)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+            _, pred = output.max(1)
+            totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
+            corrects += (pred == label).float().sum(0).cpu().numpy()
+        train_accuracies =  corrects / totals
+        train_acc = np.mean(train_accuracies)
+        train_loss = train_loss / len(train_loader)
+        writer.add_scalar("train/loss", train_loss, epoch)
+        writer.add_scalar("train/avg_acc", train_acc, epoch)
+        logger.write(f"Epoch {epoch+1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time()-train_time:.3f}s\n")
+        for i, acc in enumerate(train_accuracies):
+            writer.add_scalar(f"train/acc_{i}", acc, epoch)
+
+        model.eval()
+        val_loss = 0.
+        val_time = time.time()
+        totals = np.array([0 for _ in range(num_classes)])
+        corrects = np.array([0 for _ in range(num_classes)])
+        with torch.no_grad():
+            for i, (image, label) in enumerate(val_loader):
+                image = image.to(device)
+                label = label.to(device)
+                output = model(image)
+                loss = criterion(output, label)
+                val_loss += loss.item()
+                _, pred = output.max(1)
+                totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
+                corrects += (pred == label).float().sum(0).cpu().numpy()
+        val_accuracies =  corrects / totals
+        val_acc = np.mean(val_accuracies)
+        val_loss = val_loss / len(val_loader)
+        writer.add_scalar("val/loss", val_loss, epoch)
+        writer.add_scalar("val/avg_acc", val_acc, epoch)
+        logger.write(f"\n\tVal Loss: {val_loss:.3f}\n\tVal Accuracy: {val_acc:.3f}\n\tVal Time: {time.time()-val_time:.3f}s\n")
+        for i, acc in enumerate(val_accuracies):
+            writer.add_scalar(f"val/acc_{i}", acc, epoch)
+
+        lr_scheduler.step()
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save({
+                'epoch': epoch+1,
+                'best_acc': best_acc,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+            }, os.path.join(log_path, "best.pth"))
+            print(f"Best model saved with acc: {best_acc:.3f}")
+            logger.write(f"Best model saved with acc: {best_acc:.3f}\n")
+        torch.save({
+            'epoch': epoch+1,
+            'best_acc': best_acc,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+        }, os.path.join(log_path, "latest.pth"))
+        writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)
+    print(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
+    logger.write(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB\n")
+    logger.close()
+    writer.close()
 
 
+if __name__ == '__main__':
+    main()

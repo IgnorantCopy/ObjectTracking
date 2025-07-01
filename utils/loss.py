@@ -8,7 +8,7 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.weight = weight
 
-    def forward(self, input, target):
-        ce_loss = nn.CrossEntropyLoss(weight=self.weight)(input, target)
+    def forward(self, pred, label):
+        ce_loss = nn.CrossEntropyLoss(weight=self.weight)(pred, label)
         pt = torch.exp(-ce_loss)
         return (1 - pt) ** self.gamma * ce_loss
