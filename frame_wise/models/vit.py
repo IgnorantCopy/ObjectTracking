@@ -82,14 +82,14 @@ class ViT(nn.Module):
         super().__init__()
         self.image_size = (image_size, image_size) if isinstance(image_size, int) else image_size
         self.patch_size = (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
-        assert image_size[0] % patch_size[0] == 0 and image_size[1] % patch_size[1] == 0, 'image size must be divisible by patch_size'
 
         height, width = self.image_size
         patch_height, patch_width = self.patch_size
         patch_dim = in_channels * patch_height * patch_width
+        assert height % patch_height == 0 and width % patch_width == 0, 'image size must be divisible by patch_size'
 
         self.patch_embedding = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_width, p2=patch_height),
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
             nn.LayerNorm(patch_dim),
             nn.Linear(patch_dim, dim),
             nn.LayerNorm(dim),

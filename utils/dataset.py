@@ -4,7 +4,7 @@ import h5py
 import glob
 import random
 import numpy as np
-from math import sqrt, log10
+from math import log10
 from torch.utils.data import Dataset
 
 
@@ -73,7 +73,7 @@ class RDMap(Dataset):
         cls = int(re.match(r".*Label_(\d+).*", data_path).group(1))
         if self.transform:
             image = self.transform(image)
-        return image, cls
+        return image, cls - 1
 
     @staticmethod
     def _db(real, imag, eps=1e-10):
@@ -100,4 +100,4 @@ class RDMap(Dataset):
                 real = rd_matrix[i][j][0]
                 imag = rd_matrix[i][j][1]
                 value[i][j] = self._db(real, imag)
-        return value
+        return value[:, :, None]

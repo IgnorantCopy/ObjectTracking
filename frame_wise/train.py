@@ -14,9 +14,9 @@ from utils import config, dataset
 def config_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", type=str, default='../configs/frame_wise/vit.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="./logs",                         help="path to log file")
+    parser.add_argument("--log-path",    type=str, default="logs",                         help="path to log file")
     parser.add_argument("--resume",      type=str, default=None,                             help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cuda",                           help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--device",      type=str, default="cpu",                           help="device to use", choices=["cuda", "cpu"])
     args = parser.parse_args()
     print(args)
     return args
@@ -34,7 +34,7 @@ def main():
     device      = args.device
 
     log_path = os.path.join(log_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
-    config.check_paths(config_path, log_path, resume)
+    config.check_paths(log_path)
     writer = SummaryWriter(log_dir=log_path)
     logger = open(os.path.join(log_path, "train.txt"), "w")
     model_config, data_config, train_config = config.get_config(config_path)
@@ -42,6 +42,7 @@ def main():
     data_root   = data_config['data_root']
     val_ratio   = data_config['val_ratio']
     shuffle     = data_config['shuffle']
+    config.check_paths(data_root)
 
     batch_size       = train_config['batch_size']
     num_workers      = train_config['num_workers']
@@ -75,6 +76,7 @@ def main():
     model.to(device)
 
     train_transform = transforms.Compose([
+        transforms.ToPILImage(),
         transforms.Resize((height, width)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -89,15 +91,15 @@ def main():
     train_paths, val_paths = dataset.split_train_val(data_root, val_ratio, shuffle)
     train_dataset = dataset.RDMap(train_paths, transform=train_transform)
     val_dataset = dataset.RDMap(val_paths, transform=val_transform)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers)
 
     for epoch in range(start_epoch, epochs):
         model.train()
         train_loss = 0.
         train_time = time.time()
-        totals = np.array([0 for _ in range(num_classes)])
-        corrects = np.array([0 for _ in range(num_classes)])
+        totals = np.array([0. for _ in range(num_classes)])
+        corrects = np.array([0. for _ in range(num_classes)])
         for i, (image, label) in enumerate(train_loader):
             image = image.to(device)
             label = label.to(device)
