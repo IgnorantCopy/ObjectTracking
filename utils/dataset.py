@@ -32,7 +32,7 @@ def split_train_val(data_root: str, val_ratio=0.2, shuffle=True):
         if shuffle:
             random.shuffle(data_path)
         train_paths.extend(data_path[:train_nums[i]])
-        val_paths.extend(data_path[train_nums[i]:val_nums[i]])
+        val_paths.extend(data_path[train_nums[i]:train_nums[i] + val_nums[i]])
     return train_paths, val_paths
 
 

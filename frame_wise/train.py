@@ -14,9 +14,9 @@ from utils import config, dataset
 def config_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", type=str, default='../configs/frame_wise/vit.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="logs",                         help="path to log file")
+    parser.add_argument("--log-path",    type=str, default="./logs",                         help="path to log file")
     parser.add_argument("--resume",      type=str, default=None,                             help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cpu",                           help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--device",      type=str, default="cuda",                           help="device to use", choices=["cuda", "cpu"])
     args = parser.parse_args()
     print(args)
     return args
@@ -31,7 +31,7 @@ def main():
     config_path = args.config_path
     log_path    = args.log_path
     resume      = args.resume
-    device      = args.device
+    device      = args.device if torch.cuda.is_available() else "cpu"
 
     log_path = os.path.join(log_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
     config.check_paths(log_path)
@@ -73,7 +73,10 @@ def main():
         start_epoch = checkpoint['epoch']
         best_acc = checkpoint['best_acc']
         print(f"Loaded checkpoint from {resume}")
+        logger.write(f"Loaded checkpoint from {resume}\n")
+    model.half()
     model.to(device)
+    logger.flush()
 
     train_transform = transforms.Compose([
         transforms.ToPILImage(),
@@ -84,6 +87,8 @@ def main():
                              std=[0.5 for _ in range(channels)]),
     ])
     val_transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((height, width)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5 for _ in range(channels)],
                              std=[0.5 for _ in range(channels)]),
@@ -92,7 +97,7 @@ def main():
     train_dataset = dataset.RDMap(train_paths, transform=train_transform)
     val_dataset = dataset.RDMap(val_paths, transform=val_transform)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     for epoch in range(start_epoch, epochs):
         model.train()
@@ -102,6 +107,7 @@ def main():
         corrects = np.array([0. for _ in range(num_classes)])
         for i, (image, label) in enumerate(train_loader):
             image = image.to(device)
+            image = image.half()
             label = label.to(device)
             optimizer.zero_grad()
             output = model(image)
@@ -111,12 +117,14 @@ def main():
             train_loss += loss.item()
             _, pred = output.max(1)
             totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
-            corrects += (pred == label).float().sum(0).cpu().numpy()
+            for j in range(num_classes):
+                corrects[j] += (pred[label == j] == j).float().sum().item()
         train_accuracies =  corrects / totals
-        train_acc = np.mean(train_accuracies)
+        train_acc = corrects.sum() / totals.sum()
         train_loss = train_loss / len(train_loader)
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/avg_acc", train_acc, epoch)
+        print(f"Epoch {epoch+1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time()-train_time:.3f}s")
         logger.write(f"Epoch {epoch+1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time()-train_time:.3f}s\n")
         for i, acc in enumerate(train_accuracies):
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
@@ -124,28 +132,31 @@ def main():
         model.eval()
         val_loss = 0.
         val_time = time.time()
-        totals = np.array([0 for _ in range(num_classes)])
-        corrects = np.array([0 for _ in range(num_classes)])
+        totals = np.array([0. for _ in range(num_classes)])
+        corrects = np.array([0. for _ in range(num_classes)])
         with torch.no_grad():
             for i, (image, label) in enumerate(val_loader):
                 image = image.to(device)
+                image = image.half()
                 label = label.to(device)
                 output = model(image)
                 loss = criterion(output, label)
                 val_loss += loss.item()
                 _, pred = output.max(1)
                 totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
-                corrects += (pred == label).float().sum(0).cpu().numpy()
+                for j in range(num_classes):
+                    corrects[j] += (pred[label == j] == j).float().sum().item()
         val_accuracies =  corrects / totals
-        val_acc = np.mean(val_accuracies)
+        val_acc = corrects.sum() / totals.sum()
         val_loss = val_loss / len(val_loader)
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/avg_acc", val_acc, epoch)
+        print(f"\n\tVal Loss: {val_loss:.3f}\n\tVal Accuracy: {val_acc:.3f}\n\tVal Time: {time.time()-val_time:.3f}s")
         logger.write(f"\n\tVal Loss: {val_loss:.3f}\n\tVal Accuracy: {val_acc:.3f}\n\tVal Time: {time.time()-val_time:.3f}s\n")
         for i, acc in enumerate(val_accuracies):
             writer.add_scalar(f"val/acc_{i}", acc, epoch)
 
-        lr_scheduler.step()
+        lr_scheduler.step(val_loss)
         if val_acc > best_acc:
             best_acc = val_acc
             torch.save({
@@ -165,6 +176,9 @@ def main():
             'lr_scheduler': lr_scheduler.state_dict(),
         }, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)
+        print('-' * 50)
+        logger.write('-' * 50 + '\n')
+        logger.flush()
     print(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
     logger.write(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB\n")
     logger.close()

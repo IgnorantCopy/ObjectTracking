@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
+from flash_attn import flash_attn_func
 
 
 def positional_embedding_2d(height, width, dim, temperature=10000, dtype=torch.float32):
@@ -40,8 +41,7 @@ class Attention(nn.Module):
         self.heads = heads
         self.scale = dim_head ** -0.5
         self.norm = nn.LayerNorm(dim)
-        self.softmax = nn.Softmax(dim=-1)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = dropout
         self.qkv = nn.Linear(dim, inner_dim * 3, bias=False)
         self.proj = nn.Sequential(
             nn.Linear(inner_dim, dim, bias=False),
@@ -52,9 +52,7 @@ class Attention(nn.Module):
         x = self.norm(x)
         qkv = self.qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
-        attention = self.softmax((q @ k.transpose(-1, -2)) * self.scale)
-        attention = self.dropout(attention)
-        x = attention @ v
+        x = flash_attn_func(q, k, v, self.dropout, self.scale)
         x = rearrange(x, 'b h n d -> b n (h d)')
         return self.proj(x)
 

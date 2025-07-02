@@ -176,3 +176,4 @@ cython_debug/
 # custom
 data/echo_sequence/dataset
 record/
+frame_wise/logs
