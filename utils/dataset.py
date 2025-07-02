@@ -51,7 +51,6 @@ def read_mat(path):
     with h5py.File(path, 'r') as f:
         var_names = list(f.keys())
         data = {}
-
         for var_name in var_names:
             if isinstance(f[var_name], h5py.Dataset):
                 data[var_name] = np.array(f[var_name]).T
@@ -85,13 +84,16 @@ class RDMap(Dataset):
             return 10 * (log10(real_mantissa ** 2 + imag_mantissa ** 2 + eps) + 2 * imag_exponent)
         elif real_exponent < imag_exponent:
             imag_mantissa *= 10 ** (imag_exponent - real_exponent)
-            return 20 * (log10(sqrt(real_mantissa ** 2 + imag_mantissa ** 2 + eps)) + real_exponent)
+            return 10 * (log10(real_mantissa ** 2 + imag_mantissa ** 2 + eps) + 2 * real_exponent)
         else:
-            return 20 * (log10(sqrt(real_mantissa ** 2 + imag_mantissa ** 2 + eps)) + real_exponent)
+            return 10 * (log10(real_mantissa ** 2 + imag_mantissa ** 2 + eps) + 2 * real_exponent)
 
     def _load_image(self, path):
         data = read_mat(path)
         rd_matrix = data['rd_matrix']
+        velocity_axis = data['velocity_axis']
+        velocity_mask = np.reshape(np.abs(velocity_axis) < 56, -1)
+        rd_matrix = rd_matrix[:, velocity_mask]
         value = np.zeros_like(rd_matrix, dtype=np.float64)
         for i in range(len(rd_matrix)):
             for j in range(len(rd_matrix[i])):

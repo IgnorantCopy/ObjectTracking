@@ -8,11 +8,11 @@ model:
   dropout: 0.
   emb_dropout: 0.
   patch_height: 4
-  patch_width: 100
+  patch_width: 68
 
 
 data:
-  data_root: E:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
+  data_root: /home/nju-student/mkh/datasets/radar/MTD_Results
   val_ratio: 0.2
   shuffle: True
 
@@ -23,7 +23,7 @@ train:
   num_epochs: 100
   lr: 0.001
   height: 32
-  width: 900
+  width: 544
   num_classes: 6
   channels: 1
   lr_scheduler:
