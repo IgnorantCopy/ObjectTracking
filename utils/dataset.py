@@ -100,4 +100,7 @@ class RDMap(Dataset):
                 real = rd_matrix[i][j][0]
                 imag = rd_matrix[i][j][1]
                 value[i][j] = self._db(real, imag)
+        velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
+        value[:, velocity_index - 4:velocity_index + 3] = 0
+        value[value < np.percentile(value, 5)] = 0
         return value[:, :, None]

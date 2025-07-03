@@ -30,6 +30,7 @@ train:
     name: ReduceLROnPlateau
     factor: 0.5
     patience: 5
+    min_lr: 0.000001
   optimizer:
     name: SGD
     momentum: 0.9
