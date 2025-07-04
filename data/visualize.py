@@ -4,7 +4,7 @@ import glob
 import numpy as np
 from math import sqrt, log10
 from matplotlib import pyplot as plt
-from utils.dataset import split_scientific_str
+from frame_wise.utils.dataset import split_scientific_str
 
 
 def read_matlab_v73_file(label, batch, frame):

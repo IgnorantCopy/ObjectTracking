@@ -104,3 +104,4 @@ class RDMap(Dataset):
         value[:, velocity_index - 4:velocity_index + 3] = 0
         value[value < np.percentile(value, 5)] = 0
         return value[:, :, None]
+

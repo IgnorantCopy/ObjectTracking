@@ -42,6 +42,7 @@ def main():
     data_root   = data_config['data_root']
     val_ratio   = data_config['val_ratio']
     shuffle     = data_config['shuffle']
+    seq_len     = data_config['seq_len']
     config.check_paths(data_root)
 
     batch_size       = train_config['batch_size']
@@ -58,7 +59,7 @@ def main():
 
     start_epoch = 0
     best_acc = 0.
-    model = config.get_model(model_config, channels, num_classes, height, width)
+    model = config.get_model(model_config, channels, num_classes, height, width, seq_len)
     optimizer = config.get_optimizer(optimizer_config, model, lr)
     lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
     criterion = config.get_criterion(loss_config)
@@ -98,8 +99,8 @@ def main():
                              std=[0.5 for _ in range(channels)]),
     ])
     train_paths, val_paths = dataset.split_train_val(data_root, val_ratio, shuffle)
-    train_dataset = dataset.RDMap(train_paths, transform=train_transform)
-    val_dataset = dataset.RDMap(val_paths, transform=val_transform)
+    train_dataset = dataset.RDSeq(train_paths, transform=train_transform)
+    val_dataset = dataset.RDSeq(val_paths, transform=val_transform)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 

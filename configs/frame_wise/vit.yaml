@@ -15,6 +15,7 @@ data:
   data_root: E:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
   val_ratio: 0.2
   shuffle: True
+  seq_len: 180
 
 
 train:

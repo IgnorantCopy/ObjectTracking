@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from utils import loss
+from frame_wise.utils import loss
 
 
 def check_paths(*paths):
@@ -70,14 +70,13 @@ def get_model(config, channels, num_classes, height, width):
 def get_optimizer(config, model, lr):
     if config['name'] == 'Adam':
         weight_decay = config['weight_decay']
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif config['name'] == 'SGD':
         weight_decay = config['weight_decay']
         momentum = config['momentum']
-        optimizer = optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+        return optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
     else:
         raise NotImplementedError(f"Optimizer {config['name']} not implemented")
-    return optimizer
 
 
 def get_lr_scheduler(config, optimizer):
@@ -85,18 +84,16 @@ def get_lr_scheduler(config, optimizer):
         factor = config['factor']
         patience = config['patience']
         min_lr = config['min_lr']
-        lr_scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, min_lr=min_lr)
+        return ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, min_lr=min_lr)
     else:
         raise NotImplementedError(f"LR Scheduler {config['name']} not implemented")
-    return lr_scheduler
 
 
 def get_criterion(config):
     if config['name'] == 'CrossEntropyLoss':
-        criterion = nn.CrossEntropyLoss()
+        return nn.CrossEntropyLoss()
     elif config['name'] == "FocalLoss":
         gamma = config['gamma']
-        criterion = loss.FocalLoss(gamma=gamma)
+        return loss.FocalLoss(gamma=gamma)
     else:
         raise NotImplementedError(f"Loss {config['name']} not implemented")
-    return criterion
