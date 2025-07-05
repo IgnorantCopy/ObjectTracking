@@ -184,8 +184,8 @@ def main():
         print('-' * 50)
         logger.write('-' * 50 + '\n')
         logger.flush()
-    print(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
-    logger.write(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB\n")
+    print(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
+    logger.write(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB\n")
     logger.close()
     writer.close()
 
