@@ -1,0 +1,42 @@
+model:
+  name: Vit
+  dim: 768
+  depth: 12
+  heads: 12
+  mlp_dim: 768
+  dim_head: 64
+  dropout: 0.
+  emb_dropout: 0.
+  patch_height: 4
+  patch_width: 68
+
+
+data:
+  data_root: E:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
+  val_ratio: 0.2
+  shuffle: True
+  seq_len: 180
+
+
+train:
+  batch_size: 4
+  num_workers: 4
+  num_epochs: 100
+  lr: 0.001
+  height: 32
+  width: 544
+  num_classes: 6
+  channels: 1
+  lr_scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
+  optimizer:
+    name: SGD
+    momentum: 0.9
+    weight_decay: 0.0005
+  loss:
+    name: FocalLoss
+    gamma: 2.0
+
