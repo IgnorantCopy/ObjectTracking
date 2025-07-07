@@ -8,12 +8,15 @@ from math import log10
 from torch.utils.data import Dataset
 
 
-def split_train_val(data_root: str, val_ratio=0.2, shuffle=True):
+def split_train_val(data_root: str, num_classes: int, val_ratio=0.2, shuffle=True):
     label_dirs = glob.glob(f"{data_root}/Label_*")
     label_dirs.sort()
     label_nums = []
     data_paths = []
     for label_dir in label_dirs:
+        label = int(re.match(r".*Label_(\d+).*", label_dir).group(1))
+        if label > num_classes:
+            continue
         batch_dirs = glob.glob(f"{label_dir}/Batch_*")
         batch_dirs.sort()
         label_num = 0

@@ -1,29 +1,25 @@
 model:
-  name: SwinTransformer
-  patch_height: 2
-  patch_width: 34
-  embed_dim: 96
-  depths: [ 2, 2 ]
-  heads: [ 3, 6 ]
-  window_size: 4
-  ff_ratio: 4.0
-  qkv_bias: True
-  dropout: 0.
-  attn_dropout: 0.
-  dropout_path: 0.1
-  norm: LayerNorm
-  patch_norm: True
-  ape: False
+  name: Vit
+  dim: 768
+  depth: 12
+  heads: 12
+  mlp_dim: 768
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.1
+  patch_height: 4
+  patch_width: 68
 
 
 data:
   data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
   val_ratio: 0.2
   shuffle: True
+  seq_len: 180
 
 
 train:
-  batch_size: 16
+  batch_size: 4
   num_workers: 4
   num_epochs: 100
   lr: 0.001
@@ -35,7 +31,7 @@ train:
     name: ReduceLROnPlateau
     factor: 0.5
     patience: 5
-    min_lr: 0.000001
+    min_lr: 1e-6
   optimizer:
     name: SGD
     momentum: 0.9

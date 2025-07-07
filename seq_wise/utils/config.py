@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from frame_wise.utils import loss
+from seq_wise.utils import loss
 
 
 def check_paths(*paths):
@@ -23,7 +23,7 @@ def get_config(config_path: str):
 
 def get_model(config, channels, num_classes, height, width, seq_len):
     if config["name"] == "Vit":
-        from seq.models.vit import OuterVit
+        from seq_wise.models.vit import OuterVit
         dim = config["dim"]
         depth = config["depth"]
         heads = config["heads"]

@@ -22,10 +22,7 @@ def get_config(config_path: str):
 
 
 def get_model(config, channels, num_classes, height, width):
-    if config["name"] == "RDNet":
-        from frame_wise.models.cnn import RDNet
-        return RDNet(channels=channels, num_classes=num_classes)
-    elif config["name"] == "Vit":
+    if config["name"] == "Vit":
         from frame_wise.models.vit import ViT
         dim          = config["dim"]
         depth        = config["depth"]
@@ -36,9 +33,9 @@ def get_model(config, channels, num_classes, height, width):
         emb_dropout  = config["emb_dropout"]
         patch_height = config["patch_height"]
         patch_width  = config["patch_width"]
-        return ViT(in_channels=channels, num_classes=num_classes, image_size=(height, width),
-                   patch_size=(patch_height, patch_width), dim=dim, depth=depth, heads=heads,
-                   mlp_dim=mlp_dim, dim_head=dim_head, dropout=dropout, emb_dropout=emb_dropout)
+        model = ViT(in_channels=channels, num_classes=num_classes, image_size=(height, width),
+                    patch_size=(patch_height, patch_width), dim=dim, depth=depth, heads=heads,
+                    mlp_dim=mlp_dim, dim_head=dim_head, dropout=dropout, emb_dropout=emb_dropout)
     elif config["name"] == "SwinTransformer":
         from frame_wise.models.swin import SwinTransformer
         patch_height = config["patch_height"]
@@ -59,12 +56,14 @@ def get_model(config, channels, num_classes, height, width):
             norm = nn.LayerNorm
         else:
             raise NotImplementedError(f"Normalization {norm} not implemented")
-        return SwinTransformer(image_size=(height, width), patch_size=(patch_height, patch_width), in_channels=channels,
-                               num_classes=num_classes, embed_dim=embed_dim, depths=depths, heads=heads, ape=ape,
-                               window_size=window_size, ff_ratio=ff_ratio, qkv_bias=qkv_bias, dropout=dropout,
-                               attn_dropout=attn_dropout, dropout_path=dropout_path, norm=norm, patch_norm=patch_norm)
+        model = SwinTransformer(image_size=(height, width), patch_size=(patch_height, patch_width), in_channels=channels,
+                                num_classes=num_classes, embed_dim=embed_dim, depths=depths, heads=heads, ape=ape,
+                                window_size=window_size, ff_ratio=ff_ratio, qkv_bias=qkv_bias, dropout=dropout,
+                                attn_dropout=attn_dropout, dropout_path=dropout_path, norm=norm, patch_norm=patch_norm)
     else:
         raise NotImplementedError(f"Model {config['name']} not implemented")
+
+    return model
 
 
 def get_optimizer(config, model, lr):

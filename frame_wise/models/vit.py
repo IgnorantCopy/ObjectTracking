@@ -97,7 +97,7 @@ class ViT(nn.Module):
         self.dropout = nn.Dropout(emb_dropout)
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
         self.to_latent = nn.Identity()
-        self.cls_head = nn.Linear(dim, num_classes)
+        self.head = nn.Linear(dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward(self, x):
         x = self.patch_embedding(x)
@@ -109,4 +109,4 @@ class ViT(nn.Module):
         x = self.transformer(x)
         x = x.mean(dim=1)
         x = self.to_latent(x)
-        return self.cls_head(x)
+        return self.head(x)

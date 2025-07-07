@@ -12,10 +12,9 @@ model:
 
 
 data:
-  data_root: E:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
+  data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/MTD_Results
   val_ratio: 0.2
   shuffle: True
-  seq_len: 180
 
 
 train:
@@ -31,7 +30,7 @@ train:
     name: ReduceLROnPlateau
     factor: 0.5
     patience: 5
-    min_lr: 0.000001
+    min_lr: 1e-6
   optimizer:
     name: SGD
     momentum: 0.9

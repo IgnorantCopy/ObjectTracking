@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="On explicit save action" serverName="nju-4090" autoUploadExternalChanges="true">
-    <serverData>
-      <paths name="nju-4090">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/home/nju-student/mkh/codes/ObjectTracking" local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-    </serverData>
+  <component name="PublishConfigData" autoUpload="On explicit save action" autoUploadExternalChanges="true">
     <option name="myAutoUpload" value="ON_EXPLICIT_SAVE" />
   </component>
 </project>
