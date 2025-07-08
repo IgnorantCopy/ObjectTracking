@@ -36,6 +36,20 @@ def get_model(config, channels, num_classes, height, width, seq_len):
         return OuterVit(dim=dim, depth=depth, heads=heads, mlp_dim=mlp_dim, image_size=(height, width),
                         patch_size=(patch_height, patch_width), in_channels=channels, num_classes=num_classes,
                         seq_len=seq_len, dim_head=dim_head, dropout=dropout, emb_dropout=emb_dropout)
+    elif config["name"] == "ViViT":
+        from seq_wise.models.vivit import ViViT
+        dim = config["dim"]
+        depth = config["depth"]
+        heads = config["heads"]
+        mlp_dim = config["mlp_dim"]
+        dim_head = config["dim_head"]
+        dropout = config["dropout"]
+        emb_dropout = config["emb_dropout"]
+        patch_height = config["patch_height"]
+        patch_width = config["patch_width"]
+        return ViViT(dim=dim, depth=depth, heads=heads, mlp_dim=mlp_dim, image_size=(height, width),
+                     patch_size=(patch_height, patch_width), in_channels=channels, num_classes=num_classes,
+                     seq_len=seq_len, dim_head=dim_head, dropout=dropout, emb_dropout=emb_dropout)
     else:
         raise NotImplementedError(f"Model {config['name']} not implemented")
 

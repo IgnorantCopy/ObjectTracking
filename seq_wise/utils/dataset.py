@@ -54,11 +54,11 @@ def read_mat(path):
 
 
 class RDSeq(Dataset):
-    def __init__(self, data_paths: list, transform=None, max_sqe_len=180):
+    def __init__(self, data_paths: list, transform=None, seq_len=180):
         super().__init__()
         self.data_paths = data_paths
         self.transform = transform
-        self.max_sqe_len = max_sqe_len
+        self.seq_len = seq_len
 
     def __len__(self):
         return len(self.data_paths)
@@ -68,19 +68,21 @@ class RDSeq(Dataset):
         frame_paths = glob.glob(f"{batch_path}/Frame_*")
         frame_paths.sort()
         cls = int(re.match(r".*Label_(\d+).*", batch_path).group(1))
+        batch_id = int(re.match(r".*Batch_(\d+).*", batch_path).group(1))
         images = []
         for i, frame_path in enumerate(frame_paths):
-            if i >= self.max_sqe_len:
-                break
             image_path = os.path.join(frame_path, "MTD_result.mat")
             image = self._load_image(image_path)
             if self.transform:
                 image = self.transform(image)
             images.append(image)
-        for i in range(len(images), self.max_sqe_len):
-            images.append(np.zeros_like(images[0]))
         images = np.stack(images, axis=0)
-        assert images.shape[0] == self.max_sqe_len
+        if images.shape[0] < self.seq_len:
+            images = np.concatenate([images, np.zeros((self.seq_len - images.shape[0], *images.shape[1:]))], axis=0)
+        elif images.shape[0] > self.seq_len:
+            indices = np.linspace(0, images.shape[0] - 1, self.seq_len, dtype=int)
+            images = images[indices]
+        assert images.shape[0] == self.seq_len
         return images, cls - 1
 
     @staticmethod

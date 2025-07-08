@@ -97,7 +97,7 @@ def main():
         best_acc = checkpoint['best_acc']
         print(f"Loaded checkpoint from {resume}")
         logger.log(f"Loaded checkpoint from {resume}")
-    # model.half()
+    model.half()
     model.to(device)
 
     train_transform = transforms.Compose([
@@ -116,8 +116,8 @@ def main():
                              std=[0.5 for _ in range(channels)]),
     ])
     train_paths, val_paths = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.RDSeq(train_paths, transform=train_transform)
-    val_dataset = dataset.RDSeq(val_paths, transform=val_transform)
+    train_dataset = dataset.RDSeq(train_paths, transform=train_transform, seq_len=seq_len)
+    val_dataset = dataset.RDSeq(val_paths, transform=val_transform, seq_len=seq_len)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
@@ -129,7 +129,7 @@ def main():
         corrects = np.array([0. for _ in range(num_classes)])
         for i, (image, label) in enumerate(train_loader):
             image = image.to(device)
-            # image = image.half()
+            image = image.half()
             label = label.to(device)
             optimizer.zero_grad()
             output = model(image)
@@ -158,7 +158,7 @@ def main():
         with torch.no_grad():
             for i, (image, label) in enumerate(val_loader):
                 image = image.to(device)
-                # image = image.half()
+                image = image.half()
                 label = label.to(device)
                 output = model(image)
                 loss = criterion(output, label)

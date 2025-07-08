@@ -76,7 +76,7 @@ def main():
     params = torch.load(model_path)
     model.load_state_dict(params['state_dict'])
     model.to(device)
-    target_layers = [model.transformer]
+    target_layers = [model.spatial_transformer]
     cam = GradCAM(model, target_layers)
 
     to_tensor = transforms.Compose([
