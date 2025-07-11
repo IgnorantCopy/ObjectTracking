@@ -15,7 +15,7 @@ from utils.logger import Logger
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path", type=str, default='../configs/seq_wise/vit.yaml', help="path to config file")
+    parser.add_argument("--config-path", type=str, default='../configs/seq_wise/swin.yaml', help="path to config file")
     parser.add_argument("--log-path",    type=str, default="./logs",                       help="path to log file")
     parser.add_argument("--resume",      type=str, default=None,                           help="path to checkpoint file")
     parser.add_argument("--device",      type=str, default="cuda",                         help="device to use", choices=["cuda", "cpu"])
@@ -44,6 +44,8 @@ def main():
     writer = SummaryWriter(log_dir=log_path)
     logger = Logger(os.path.join(log_path, "train.txt"))
     model_config, data_config, train_config = config.get_config(config_path)
+
+    use_flash_attn = model_config['name'] in ['Vit', 'ViViT']
 
     data_root   = data_config['data_root']
     val_ratio   = data_config['val_ratio']
@@ -97,7 +99,8 @@ def main():
         best_acc = checkpoint['best_acc']
         print(f"Loaded checkpoint from {resume}")
         logger.log(f"Loaded checkpoint from {resume}")
-    model.half()
+    if use_flash_attn:
+        model.half()
     model.to(device)
 
     train_transform = transforms.Compose([
@@ -129,7 +132,10 @@ def main():
         corrects = np.array([0. for _ in range(num_classes)])
         for i, (image, label) in enumerate(train_loader):
             image = image.to(device)
-            image = image.half()
+            if use_flash_attn:
+                image = image.half()
+            else:
+                image = image.float()
             label = label.to(device)
             optimizer.zero_grad()
             output = model(image)
@@ -158,7 +164,10 @@ def main():
         with torch.no_grad():
             for i, (image, label) in enumerate(val_loader):
                 image = image.to(device)
-                image = image.half()
+                if use_flash_attn:
+                    image = image.half()
+                else:
+                    image = image.float()
                 label = label.to(device)
                 output = model(image)
                 loss = criterion(output, label)

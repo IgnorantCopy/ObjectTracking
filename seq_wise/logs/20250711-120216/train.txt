@@ -1,0 +1,59 @@
+Model has 1.16MB parameters.
+Epoch 1:
+	Train Loss: 0.782
+	Train Accuracy: 0.260
+	Train Time: 648.514s
+
+	Val Loss: 0.764
+	Val Accuracy: 0.332
+	Val Time: 197.595s
+Best model saved with acc: 0.332
+--------------------------------------------------
+Epoch 2:
+	Train Loss: 0.769
+	Train Accuracy: 0.300
+	Train Time: 658.415s
+
+	Val Loss: 0.758
+	Val Accuracy: 0.368
+	Val Time: 180.136s
+Best model saved with acc: 0.368
+--------------------------------------------------
+Epoch 3:
+	Train Loss: 0.763
+	Train Accuracy: 0.314
+	Train Time: 667.593s
+
+	Val Loss: 0.747
+	Val Accuracy: 0.336
+	Val Time: 185.846s
+--------------------------------------------------
+Epoch 4:
+	Train Loss: 0.759
+	Train Accuracy: 0.313
+	Train Time: 631.856s
+
+	Val Loss: 0.732
+	Val Accuracy: 0.357
+	Val Time: 171.262s
+--------------------------------------------------
+Epoch 5:
+	Train Loss: 0.755
+	Train Accuracy: 0.306
+	Train Time: 663.453s
+
+	Val Loss: 0.730
+	Val Accuracy: 0.371
+	Val Time: 174.248s
+Best model saved with acc: 0.371
+--------------------------------------------------
+Epoch 6:
+	Train Loss: 0.746
+	Train Accuracy: 0.340
+	Train Time: 608.477s
+
+	Val Loss: 0.722
+	Val Accuracy: 0.457
+	Val Time: 172.446s
+Best model saved with acc: 0.457
+--------------------------------------------------
