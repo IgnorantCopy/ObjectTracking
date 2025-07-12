@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from thop import profile
 from timm.layers import DropPath, trunc_normal_
 from functools import lru_cache
 
@@ -25,7 +26,8 @@ class FeedForward(nn.Module):
 
 
 def window_partition(x: torch.Tensor, window_size: tuple[int, int, int]):
-    x = rearrange(x, "b (d_w w1) (h_w w2) (w_w w3) c -> (b d_w h_w w_w) (w1 w2 w3) c", w1=window_size[0], w2=window_size[1], w3=window_size[2])
+    w1, w2, w3 = window_size
+    x = rearrange(x, "b (d_w w1) (h_w w2) (w_w w3) c -> (b d_w h_w w_w) (w1 w2 w3) c", w1=w1, w2=w2, w3=w3)
     return x
 
 
@@ -72,15 +74,15 @@ class WindowAttention3D(nn.Module):
         coords = torch.stack(
             torch.meshgrid([coords_d, coords_h, coords_w])
         ).flatten(start_dim=1)  # [3, window_d * window_h * window_w]
-        relative_coords = coords[:, :, None] - coords[:, None, :]    # [3, w_d * w_h * w_w, w_d * w_h * w_w]
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous() # [w_d * w_h * w_w, w_d * w_h * w_w, 3]
+        relative_coords = coords[:, :, None] - coords[:, None, :]  # [3, w_d * w_h * w_w, w_d * w_h * w_w]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [w_d * w_h * w_w, w_d * w_h * w_w, 3]
         relative_coords[:, :, 0] += self.window_d - 1
         relative_coords[:, :, 1] += self.window_h - 1
         relative_coords[:, :, 2] += self.window_w - 1
 
         relative_coords[:, :, 0] *= (2 * self.window_h - 1) * (2 * self.window_w - 1)
         relative_coords[:, :, 1] *= 2 * self.window_w - 1
-        relative_position_index = relative_coords.sum(-1)    # [w_d * w_h * w_w, w_d * w_h * w_w]
+        relative_position_index = relative_coords.sum(-1)  # [w_d * w_h * w_w, w_d * w_h * w_w]
         self.register_buffer('relative_position_index', relative_position_index)
 
         self.qkv = nn.Linear(dim, 3 * dim, bias=qkv_bias)
@@ -100,7 +102,7 @@ class WindowAttention3D(nn.Module):
 
         relative_cpb = self.pbt[
             self.relative_position_index[:n, :n].reshape(-1)
-        ].reshape(n, n, -1).permute(2, 0, 1).contiguous()   # [w_d * w_h * w_w, w_d * w_h * w_w, heads]
+        ].reshape(n, n, -1).permute(2, 0, 1).contiguous()  # [w_d * w_h * w_w, w_d * w_h * w_w, heads]
         attention += relative_cpb.unsqueeze(0)
 
         if mask is not None:
@@ -194,14 +196,14 @@ class PatchMerge(nn.Module):
         x1 = x[:, :, 1::2, 0::2, :]
         x2 = x[:, :, 0::2, 1::2, :]
         x3 = x[:, :, 1::2, 1::2, :]
-        x = torch.cat([x0, x1, x2, x3], dim=-1) # [b, d, h/2 * w/2, 4 * c]
+        x = torch.cat([x0, x1, x2, x3], dim=-1)  # [b, d, h/2 * w/2, 4 * c]
 
         return self.norm(self.reduction(x))
 
 
 # cache the window partition and window reverse functions for faster computation
 @lru_cache()
-def compute_mask(d, h, w, window_size, shift_size, device):
+def compute_mask(d, h, w, window_size, shift_size, device, external_mask=None):
     w_d, w_h, w_w = window_size
     s_d, s_h, s_w = shift_size
     image_mask = torch.zeros((1, d, h, w, 1), device=device)
@@ -209,9 +211,15 @@ def compute_mask(d, h, w, window_size, shift_size, device):
     for dd in slice(-w_d), slice(-w_d, -s_d), slice(-s_d, None):
         for hh in slice(-w_h), slice(-w_h, s_h), slice(s_h, None):
             for ww in slice(-w_w), slice(-w_w, s_w), slice(s_w, None):
-                image_mask[:, dd, hh, ww, :] = count
-                count += 1
-    mask_windows = window_partition(image_mask, window_size).squeeze(-1)    # [w, w_d * w_h * w_w]
+                if external_mask is not None:
+                    effective_mask = external_mask[:, dd, hh, ww, :]
+                    if effective_mask.sum() > 0:
+                        image_mask[:, dd, hh, ww, :] = count
+                        count += 1
+                else:
+                    image_mask[:, dd, hh, ww, :] = count
+                    count += 1
+    mask_windows = window_partition(image_mask, window_size).squeeze(-1)  # [w, w_d * w_h * w_w]
     attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
     attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
     return attn_mask
@@ -237,7 +245,7 @@ class BasicLayer(nn.Module):
 
         self.downsample = downsample(dim=dim, norm=norm) if downsample else None
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         b, c, d, h, w = x.shape
         window_size, shift_size = get_window_size((d, h, w), self.window_size, self.shift_size)
         w_d, w_h, w_w = window_size
@@ -245,7 +253,14 @@ class BasicLayer(nn.Module):
         p_d = int(np.ceil(d / w_d)) * w_d
         p_h = int(np.ceil(h / w_h)) * w_h
         p_w = int(np.ceil(w / w_w)) * w_w
-        attn_mask = compute_mask(p_d, p_h, p_w, window_size, shift_size, x.device)
+
+        if mask is not None:
+            t = mask.shape[0]
+            mask = mask.reshape(d, -1).sum(1)
+            mask = (mask >= t // d // 2).int()
+            mask = mask.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand((1, d, h, w, 1))
+
+        attn_mask = compute_mask(p_d, p_h, p_w, window_size, shift_size, x.device, mask)
         for blk in self.blocks:
             x = blk(x, attn_mask)
         x = x.view(b, d, h, w, -1)
@@ -275,8 +290,7 @@ class PatchEmbedding3D(nn.Module):
         if d % p_d != 0:
             x = F.pad(x, (0, 0, 0, 0, 0, p_d - d % p_d))
 
-        x = self.proj(x)    # [b, c, d, w_h, w_w]
-        
+        x = self.proj(x)  # [b, c, d, w_h, w_w]
         if self.norm:
             _, _, d, w_h, w_w = x.shape
             x = x.flatten(2).transpose(1, 2)
@@ -350,11 +364,11 @@ class SwinTransformer3D(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         x = self.patch_embedding(x)
         x = self.pos_dropout(x)
         for layer in self.layers:
-            x = layer(x.contiguous())
+            x = layer(x.contiguous(), mask)
 
         x = rearrange(x, 'b c d h w -> b d h w c')
         x = self.norm(x)
@@ -365,3 +379,17 @@ class SwinTransformer3D(nn.Module):
     def train(self, mode=True):
         super(SwinTransformer3D, self).train(mode)
         self._freeze_stages()
+
+
+if __name__ == '__main__':
+    config_path = "../../configs/seq_wise/swin.yaml"
+    from seq_wise.utils import config
+    model_config, data_config, train_config = config.get_config(config_path)
+    height = train_config['height']
+    width = train_config['width']
+    seq_len = data_config['seq_len']
+    model = config.get_model(model_config, channels=1, num_classes=4, height=height, width=width, seq_len=seq_len)
+    image = torch.randn(8, seq_len, 1, height, width)
+    mask = torch.ones((8, seq_len))
+    flops, params = profile(model, inputs=(image, mask))
+    print(f"FLOPs: {flops / 1e9:.2f} G, Params: {params / 1e6:.2f} M")

@@ -130,15 +130,16 @@ def main():
         train_time = time.time()
         totals = np.array([0. for _ in range(num_classes)])
         corrects = np.array([0. for _ in range(num_classes)])
-        for i, (image, label) in enumerate(train_loader):
+        for i, (image, mask, label) in enumerate(train_loader):
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()
             else:
                 image = image.float()
+            mask = mask.to(device)
             label = label.to(device)
             optimizer.zero_grad()
-            output = model(image)
+            output = model(image, mask)
             loss = criterion(output, label)
             loss.backward()
             optimizer.step()
@@ -162,14 +163,15 @@ def main():
         totals = np.array([0. for _ in range(num_classes)])
         corrects = np.array([0. for _ in range(num_classes)])
         with torch.no_grad():
-            for i, (image, label) in enumerate(val_loader):
+            for i, (image, mask, label) in enumerate(val_loader):
                 image = image.to(device)
                 if use_flash_attn:
                     image = image.half()
                 else:
                     image = image.float()
+                mask = mask.to(device)
                 label = label.to(device)
-                output = model(image)
+                output = model(image, mask)
                 loss = criterion(output, label)
                 val_loss += loss.item()
                 _, pred = output.max(1)

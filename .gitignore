@@ -178,3 +178,4 @@ data/echo_sequence/dataset
 record/
 frame_wise/logs
 src/
+seq_wise/logs/

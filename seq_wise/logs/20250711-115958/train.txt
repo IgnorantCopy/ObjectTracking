@@ -1,1 +1,0 @@
-Model has 1.16MB parameters.
