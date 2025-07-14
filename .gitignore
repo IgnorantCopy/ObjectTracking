@@ -179,3 +179,4 @@ record/
 frame_wise/logs
 src/
 seq_wise/logs/
+fusion/logs/

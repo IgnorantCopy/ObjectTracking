@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from thop import profile
 from timm.layers import DropPath, trunc_normal_
 from functools import lru_cache
 
@@ -253,7 +254,9 @@ class BasicLayer(nn.Module):
         p_w = int(np.ceil(w / w_w)) * w_w
 
         if mask is not None:
-            assert mask.shape[0] == d, "mask shape should match with input shape"
+            t = mask.shape[0]
+            mask = mask.reshape(d, -1).sum(1)
+            mask = (mask >= t // d // 2).int()
             mask = mask.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand((1, d, h, w, 1))
 
         attn_mask = compute_mask(p_d, p_h, p_w, window_size, shift_size, x.device, mask)
@@ -297,7 +300,7 @@ class PatchEmbedding3D(nn.Module):
 
 
 class SwinTransformer3D(nn.Module):
-    def __init__(self, patch_size, in_channels=3, num_classes=10, embed_dim=96, depths=None, heads=None,
+    def __init__(self, patch_size, in_channels=3, embed_dim=96, depths=None, heads=None,
                  window_size=(2, 7, 7), ff_ratio=4., qkv_bias=True, scale=None, dropout=0., attn_dropout=0.,
                  dropout_path=0.1, norm=nn.LayerNorm, patch_norm=False, frozen_stages=-1):
         super().__init__()
@@ -332,7 +335,6 @@ class SwinTransformer3D(nn.Module):
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.norm = norm(self.num_features)
         self.avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
 
@@ -371,7 +373,7 @@ class SwinTransformer3D(nn.Module):
         x = self.norm(x)
         x = rearrange(x, 'b d h w c -> b c (d h w)')
         x = self.avg_pool(x).flatten(1)
-        return self.head(x)
+        return x
 
     def train(self, mode=True):
         super(SwinTransformer3D, self).train(mode)

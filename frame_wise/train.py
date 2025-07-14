@@ -194,7 +194,7 @@ def main():
         }, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)
         logger.log('-' * 50)
-    logger.log(f"Max GPU Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
+    logger.log(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
     logger.close()
     writer.close()
 

@@ -3,6 +3,7 @@ import re
 import struct
 import random
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 import polars as pl
 from scipy import signal
@@ -174,8 +175,6 @@ def read_raw_data(fid):
         e_scan_az = data_temp1[1] * 0.01
         point_num_in_bowei = data_temp1[2]
 
-        print(f"调试信息：e_scan_az={e_scan_az}, point_num_in_bowei={point_num_in_bowei}")
-
         # 添加point_num合理性检查
         if point_num_in_bowei < 0 or point_num_in_bowei > 1000:
             print(f"点数异常: {point_num_in_bowei}")
@@ -191,7 +190,6 @@ def read_raw_data(fid):
         # 提取航迹信息
         if point_num_in_bowei > 0:
             track_no_info = data_temp[:point_num_in_bowei * 4]
-            print(f"调试信息：track_no_info前4个元素={track_no_info[:4] if len(track_no_info) >= 4 else track_no_info}")
         else:
             track_no_info = np.array([], dtype=np.uint32)
 
@@ -206,8 +204,6 @@ def read_raw_data(fid):
             prt=data_temp[base_idx + 3] * 0.0125e-6,
             data_length=data_temp[base_idx + 4]
         )
-
-        print(f"调试信息：freq={params.freq / 1e6}MHz, prt_num={params.prt_num}, prt={params.prt * 1e6}μs")
 
         # 参数验证
         if params.prt_num <= 0 or params.prt_num > 10000:
@@ -238,12 +234,170 @@ def read_raw_data(fid):
         # 跳过帧尾
         fid.seek(4, 1)
 
-        print(f"成功读取数据帧，数据形状: {data_out.shape}")
         return params, data_out
 
     except Exception as e:
         print(f"读取数据时出错: {str(e)}")
         return None, None
+
+
+def process_batch(batch: BatchFile):
+        """处理单个批次的数据"""
+        # 打开原始数据文件
+        frame_count = 0
+        rd_matrices = []
+        ranges = []
+        velocities = []
+        try:
+            with open(batch.raw_file, 'rb') as fid:
+                while True:
+                    params, data = read_raw_data(fid)
+                    if params is None or data is None:
+                        break
+
+                    frame_count += 1
+
+                    # 跳过没有航迹信息的帧
+                    if len(params.track_no_info) == 0:
+                        continue
+
+                    # 添加数据验证
+                    if len(params.track_no_info) < 4:
+                        continue
+
+                    # 验证参数有效性
+                    if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
+                        continue
+
+                    try:
+                        # MTD处理
+                        distance_bins = data.shape[0]  # 距离单元数 (31)
+                        prt_bins = data.shape[1]  # PRT数
+
+                        # 生成泰勒窗 - 使用PRT数作为窗长，匹配MATLAB
+                        mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30)
+
+                        # 在距离维度重复窗函数
+                        coef_mtd_2d = np.tile(mtd_win, (prt_bins, 1))
+
+                        # 加窗处理
+                        data_windowed = data * coef_mtd_2d.T
+
+                        # FFT处理 - 在PRT维度（轴1）进行FFT
+                        mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
+
+                        # 计算多普勒速度轴 - 修复溢出问题
+                        try:
+                            delta_v = C / (2 * params.prt_num * params.prt * params.freq)
+
+                            # 检查delta_v是否有效
+                            if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
+                                print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
+                                continue
+
+                            # 修复溢出问题 - 使用更安全的方式
+                            half_prt = params.prt_num // 2
+
+                            # 检查half_prt是否合理
+                            if half_prt <= 0 or half_prt > 10000:
+                                print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
+                                continue
+
+                            # 使用int32避免溢出
+                            v_start = -int(half_prt)
+                            v_end = int(half_prt)
+                            v_indices = np.arange(v_start, v_end, dtype=np.int32)
+                            v_axis = v_indices.astype(np.float64) * delta_v
+
+                            # 检查v_axis是否有效
+                            if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
+                                print(
+                                    f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
+                                continue
+
+                        except Exception as e:
+                            print(f"警告：帧 {frame_count} 计算速度轴时出错: {str(e)}")
+                            continue
+
+                        # 目标检测
+                        amp_max_vr_unit = int(params.track_no_info[3])
+
+                        # 修正多普勒索引
+                        if amp_max_vr_unit > half_prt:
+                            amp_max_vr_unit = amp_max_vr_unit - half_prt
+                        else:
+                            amp_max_vr_unit = amp_max_vr_unit + half_prt
+
+                        # 转换为Python的0-based索引
+                        amp_max_vr_unit = amp_max_vr_unit - 1
+
+                        # 确保索引在有效范围内
+                        amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
+
+                        # 目标中心位于第16个距离单元
+                        center_local_bin = 15
+                        local_radius = 5
+
+                        # 计算局部检测窗口
+                        range_start_local = max(0, center_local_bin - local_radius)
+                        range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
+                        doppler_start = max(0, amp_max_vr_unit - local_radius)
+                        doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
+
+                        target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
+
+                        # 检测峰值
+                        abs_target = np.abs(target_sig)
+                        if abs_target.size == 0:
+                            continue
+
+                        max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
+                        amp_max_index_row, amp_max_index_col = max_idx
+
+                        # 获取目标全局距离单元索引
+                        global_range_bin = int(params.track_no_info[2])
+
+                        # 计算实际距离范围
+                        range_start_bin = global_range_bin - 15
+                        range_end_bin = global_range_bin + 15
+
+                        # 计算真实距离轴
+                        range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
+
+                        # 转换到全局距离位置
+                        detected_range_bin = range_start_local + amp_max_index_row
+                        if detected_range_bin >= len(range_plot):
+                            continue
+
+                        # 安全地计算多普勒速度
+                        doppler_idx = doppler_start + amp_max_index_col
+                        if doppler_idx >= len(v_axis):
+                            continue
+
+                        # 保存MTD处理结果
+                        rd_matrix = mtd_result
+                        range_axis = range_plot
+                        velocity_axis = v_axis
+                        velocity_mask = np.abs(velocity_axis) < 56
+                        velocity_axis = velocity_axis[velocity_mask]
+                        rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
+                        rd_matrix = np.abs(rd_matrix)
+                        rd_matrix = 20 * np.log10(rd_matrix)
+                        velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
+                        rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
+                        rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
+                        rd_matrices.append(rd_matrix)
+                        ranges.append(range_axis)
+                        velocities.append(velocity_axis)
+
+                    except Exception as e:
+                        # 静默跳过有问题的帧，避免过多错误输出
+                        continue
+
+        except Exception as e:
+            raise ValueError(f"读取原始数据文件失败：{str(e)}")
+
+        return rd_matrices, ranges, velocities
 
 
 def get_batch_file_list(root_dir: str):
@@ -369,7 +523,7 @@ class FusedDataset(Dataset):
         assert merged_data.shape[0] == self.track_seq_len
         if self.track_transform:
             merged_data = self.track_transform(merged_data)
-        return images, merged_data, image_mask, track_mask, cls
+        return batch_file, images, merged_data, image_mask, track_mask, cls
 
     def _process_batch(self, batch: BatchFile):
         """处理单个批次的数据"""
@@ -508,6 +662,7 @@ class FusedDataset(Dataset):
                         velocity_mask = np.reshape(np.abs(velocity_axis) < 56, -1)
                         rd_matrix = rd_matrix[:, velocity_mask]
                         rd_matrix = np.abs(rd_matrix)
+                        rd_matrix = 20 * np.log10(rd_matrix)
                         velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
                         rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
                         rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
@@ -597,3 +752,33 @@ class FusedDataset(Dataset):
         except Exception as e:
             print(f"读取或合并文件失败: {point_track_filepath}, {track_filepath}. 错误: {e}")
             return None
+
+
+def collate_fn(batch):
+    batch_files, stacked_images, stacked_tracks, image_masks, track_masks, labels = [], [], [], [], [], []
+    for (batch_file, images, merged_data, image_mask, track_mask, cls) in batch:
+        batch_files.append(batch_file)
+        stacked_images.append(images)
+        stacked_tracks.append(merged_data)
+        image_masks.append(image_mask)
+        track_masks.append(track_mask)
+        labels.append(cls)
+    stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
+    stacked_tracks = torch.from_numpy(np.stack(stacked_tracks, axis=0))
+    image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
+    track_masks = torch.from_numpy(np.stack(track_masks, axis=0))
+    labels = torch.tensor(labels, dtype=torch.long)
+    return batch_files, stacked_images, stacked_tracks, image_masks, track_masks, labels
+
+
+if __name__ == '__main__':
+    from visualize import visualize_rd_matrix
+
+    data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
+    batch = 1333
+    label = 2
+    batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
+                           os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_25.txt"),
+                           os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_25.txt"))
+    rd_matrices, ranges, velocities = process_batch(batch_file)
+    visualize_rd_matrix(rd_matrices[9], ranges[9], batch, label, 9)
