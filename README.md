@@ -1,52 +1,60 @@
 # ObjectTracking
 A repository for object tracking/detection for low-altitude radar.
 
-## data preparation
-### echo sequence data
-> see details at https://www.scidb.cn/en/detail?dataSetId=720626420979597312#p1
-#### download
-after running
-```bash
-cd ./data/echo_sequence
-python ./download.py
-```
-you will get .7z files
-#### extract
-> test on linux
-1. download 7zip
-```bash
-sudo apt-get install p7zip-full
-```
-2. extract data1 (for example)
-```bash
-7z x data1.7z.001
-```
-the command will automatically collect all data from data1.7z.001, data1.7z.002, etc. and extract them to directory 'data1'
-#### description
-1. data overview
+## 1. 单帧 RD 图分类方法
 
-|  name  |            scene info             |
-|:------:|:---------------------------------:|
-| data1  |  地物背景、高信噪比、 双目标、 目标由远及近、 时长 2 s   |
-| data2  |   地物背景、中等信噪比、双目标、 目标由远及近、时长 2 s   |
-| data3  |   地物背景、低信噪比、双目标、 目标由远及近、时长 2 s    |
-| data4  |   地物背景、高信噪比、双目标、 目标由近及远、时长 2 s    |
-| data5  |   地物背景、 中等信噪比、双目标、目标由近及远、时长 2 s   |
-| data6  |    地物背景、低信噪比、双目标、目标由近及远、时长 2 s    |
-| data7  |   地物背景、高信噪比、双目标、目标接近和远离、时长 4 s    |
-| data8  |  地物背景、 中等信噪比、双目标、 目标接近和远离、时长 4 s  |
-| data9  |    地物背景、低信噪比、双目标、目标由近及远、时长 6 s    |
-| data10 |  地物背景、高信噪比、目标数目变化、目标由近及远、时长 6 s   |
-| data11 | 地物背景、 中等信噪比、目标数目变化、目标接近和远离、时长 6 s |
-| data12 |   地物背景、低信噪比、双目标、目标接近和远离、时长 4 s    |
-| data13 |  地海背景、高信噪比、目标数目变化、目标由远及近、时长 6 s   |
-| data14 | 地海背景、 中等信噪比、目标数目变化、目标由远及近、时长 6 s  |
-| data15 |   地海背景、低信噪比、双目标、目标接近和远离、时长 6 s    |
+> 对应 frame_wise 目录
 
-2. details
-+ there are three files in each directory: data*.mat, data*_gate.mat and data*_value.txt
-+ data*.mat：回波数据样本，每个脉冲的采样点数固定为 319 个， 对于慢时间维， 脉冲重复频率为 32kHz，行序号代表慢时间脉冲数，列序号代表快时间采样点数
-+ data*_gate.mat：距离波门数据样本，波门起始位置对应第一个采样点，在整个数据段中随目标移动，更新率为 1 ms（32
-个脉冲更新一次）
-+ data*_value.txt：标注真值数据样本，描述如下图所示
-<img src="README.assets/value_txt.png">
+1. 实现模型：ViT、SwinTransformer
+2. 待完善：./frame_wise/models/cnn.py 以及 ./frame_wise/visualize.py
+    + 前者近期不打算实现
+    + 后者打算用 Grad-CAM 算法来可视化特征图的重要性，待实现及验证
+3. DataLoader：将 RD 图独立加载，无**序列**的概念，可通过运行 ./data/RDMap_new.m 文件获取 RD 图
+
+## 2. 多帧分类方法
+
+> 对应 seq_wsie 目录
+
+1. 实现模型：ViT in ViT、ViViT、SwinTransformer3D
+2. DataLoader：将一条航迹的 RD 图视为一个整体，包括计算准确率时
+    + 与赛方要求不一致，待完善
+
+> 注意：该版本开始 RD 图直接从原始回波中提取，不再提前准备并保存
+
+## 3. RD 图与点航数据融合方法
+
+> 对应 fusion 目录
+
+1. 实现模型：将 seq_wise 中的 SwinTransformer3D 与点航数据的 RoFormer 两个模型进行结合
+    + 目前直接将两者分类头之前的输出进行拼接，如果有更好的方案，欢迎 PR
+2. 新增功能：运行 train.py 时，可通过指定 --result-path 参数来保存最佳模型在数据集上的分类结果，以可视化的方式保存，结构如下：
+
+```shell
+└── result_path
+    ├── train
+    │   ├── correct
+    │   │   ├── Label_1
+    │   │   │   ├── Batch_1333
+    │   │   │   │   ├── Frame_1
+    │   │   │   │   │   ├── rd_map.png
+    │   │   │   │   │   └── trajectory.png
+    │   │   │   │   ├── Frame_2
+    │   │   │   │   └── ...
+    │   │   ├── Label_2
+    │   │   └── ...
+    │   └── wrong
+    │       ├── Label_1
+    │       ├── Label_2
+    │       └── ...
+    └── val
+        ├── correct
+        │   └── ...
+        ├── wrong
+        │   └── ...
+```
+
+> 注：rd_map.png 上标注了模型预测的标签，文件夹名称是真实标签
+
+3. 待完善： 
+   + 流式数据加载以及新的准确率计算方式
+   + RD 图可视化出来与原先有差别，待修改
