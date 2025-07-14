@@ -49,8 +49,8 @@ A repository for object tracking/detection for low-altitude radar.
     └── val
         ├── correct
         │   └── ...
-        ├── wrong
-        │   └── ...
+        └── wrong
+            └── ...
 ```
 
 > 注：rd_map.png 上标注了模型预测的标签，文件夹名称是真实标签

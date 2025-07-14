@@ -15,12 +15,12 @@ from utils.logger import Logger
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path", type=str, default='../configs/seq_wise/swin.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="./logs",                       help="path to log file")
-    parser.add_argument("--resume",      type=str, default=None,                           help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cuda",                         help="device to use", choices=["cuda", "cpu"])
-    parser.add_argument("--phase",       type=str, default="pretrain",                     help="train or pretrain", choices=["train", "pretrain"])
-    parser.add_argument("--pretrain",    type=str, default=None,                           help="path to the pretrain model")
+    parser.add_argument("--config-path", type=str, default='./configs/swin.yaml', help="path to config file")
+    parser.add_argument("--log-path",    type=str, default="./logs",              help="path to log file")
+    parser.add_argument("--resume",      type=str, default=None,                  help="path to checkpoint file")
+    parser.add_argument("--device",      type=str, default="cuda",                help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--phase",       type=str, default="pretrain",            help="train or pretrain", choices=["train", "pretrain"])
+    parser.add_argument("--pretrain",    type=str, default=None,                  help="path to the pretrain model")
     args = parser.parse_args()
     print(args)
     return args
@@ -206,7 +206,6 @@ def main():
             'lr_scheduler': lr_scheduler.state_dict(),
         }, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)
-        logger.log(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
         logger.log('-' * 50)
     logger.log(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
     logger.close()

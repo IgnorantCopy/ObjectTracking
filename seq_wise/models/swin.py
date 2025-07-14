@@ -382,7 +382,7 @@ class SwinTransformer3D(nn.Module):
 
 
 if __name__ == '__main__':
-    config_path = "../../configs/seq_wise/swin.yaml"
+    config_path = "../configs/swin.yaml"
     from seq_wise.utils import config
     model_config, data_config, train_config = config.get_config(config_path)
     height = train_config['height']

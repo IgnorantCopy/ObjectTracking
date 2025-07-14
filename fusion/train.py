@@ -15,13 +15,13 @@ from utils.logger import Logger
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path", type=str, default='../configs/fusion/fused.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="./logs",                       help="path to log file")
-    parser.add_argument("--resume",      type=str, default=None,                           help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cuda",                         help="device to use", choices=["cuda", "cpu"])
-    parser.add_argument("--phase",       type=str, default="pretrain",                     help="train or pretrain", choices=["train", "pretrain"])
-    parser.add_argument("--pretrain",    type=str, default=None,                           help="path to the pretrain model")
-    parser.add_argument("--result-path", type=str, default=None,                           help="path to store the result file")
+    parser.add_argument("--config-path", type=str, default='./configs/fused.yaml', help="path to config file")
+    parser.add_argument("--log-path",    type=str, default="./logs",               help="path to log file")
+    parser.add_argument("--resume",      type=str, default=None,                   help="path to checkpoint file")
+    parser.add_argument("--device",      type=str, default="cuda",                 help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--phase",       type=str, default="pretrain",             help="train or pretrain", choices=["train", "pretrain"])
+    parser.add_argument("--pretrain",    type=str, default=None,                   help="path to the pretrain model")
+    parser.add_argument("--result-path", type=str, default=None,                   help="path to store the result file")
     args = parser.parse_args()
     print(args)
     return args
@@ -229,8 +229,6 @@ def main():
     optimizer_config = train_config['optimizer']
     loss_config      = train_config['loss']
 
-    start_epoch = 0
-    best_acc = 0.
 
     if phase == "pretrain":
         num_classes -= 2    # exclude noise and unknown class
@@ -249,6 +247,8 @@ def main():
     lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
     criterion = config.get_criterion(loss_config)
 
+    start_epoch = 0
+    best_acc = 0.
     if resume:
         checkpoint = torch.load(resume)
         model.load_state_dict(checkpoint['state_dict'])

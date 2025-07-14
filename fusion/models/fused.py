@@ -18,7 +18,7 @@ class FusedModel(nn.Module):
 
 
 if __name__ == '__main__':
-    config_path = "../../configs/fusion/fused.yaml"
+    config_path = "../configs/fused.yaml"
     from fusion.utils import config
     rd_model_config, track_model_config, data_config, train_config = config.get_config(config_path)
     height = train_config['height']

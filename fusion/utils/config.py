@@ -26,23 +26,23 @@ def get_config(config_path: str):
 def get_model(rd_model_config, track_model_config, channels, num_classes):
     if rd_model_config['name'] == "SwinTransformer":
         from fusion.models.swin import SwinTransformer3D
-        patch_depth = rd_model_config["patch_depth"]
-        patch_height = rd_model_config["patch_height"]
-        patch_width = rd_model_config["patch_width"]
-        embed_dim = rd_model_config["embed_dim"]
-        depths = rd_model_config["depths"]
-        heads = rd_model_config["heads"]
-        window_depth = rd_model_config["window_depth"]
+        patch_depth   = rd_model_config["patch_depth"]
+        patch_height  = rd_model_config["patch_height"]
+        patch_width   = rd_model_config["patch_width"]
+        embed_dim     = rd_model_config["embed_dim"]
+        depths        = rd_model_config["depths"]
+        heads         = rd_model_config["heads"]
+        window_depth  = rd_model_config["window_depth"]
         window_height = rd_model_config["window_height"]
-        window_width = rd_model_config["window_width"]
-        ff_ratio = rd_model_config["ff_ratio"]
-        qkv_bias = rd_model_config["qkv_bias"]
-        dropout = rd_model_config["dropout"]
-        attn_dropout = rd_model_config["attn_dropout"]
-        dropout_path = rd_model_config["dropout_path"]
-        patch_norm = rd_model_config["patch_norm"]
+        window_width  = rd_model_config["window_width"]
+        ff_ratio      = rd_model_config["ff_ratio"]
+        qkv_bias      = rd_model_config["qkv_bias"]
+        dropout       = rd_model_config["dropout"]
+        attn_dropout  = rd_model_config["attn_dropout"]
+        dropout_path  = rd_model_config["dropout_path"]
+        patch_norm    = rd_model_config["patch_norm"]
         frozen_stages = rd_model_config["frozen_stages"]
-        norm = rd_model_config["norm"]
+        norm          = rd_model_config["norm"]
         if norm == "LayerNorm":
             norm = nn.LayerNorm
         else:
@@ -59,10 +59,10 @@ def get_model(rd_model_config, track_model_config, channels, num_classes):
     if track_model_config['name'] == "RoFormer":
         from fusion.models.RoFormer import RoFormer
         input_dim = track_model_config["input_dim"]
-        d_model = track_model_config["d_model"]
-        heads = track_model_config["heads"]
-        depth = track_model_config["depth"]
-        dropout = track_model_config["dropout"]
+        d_model   = track_model_config["d_model"]
+        heads     = track_model_config["heads"]
+        depth     = track_model_config["depth"]
+        dropout   = track_model_config["dropout"]
         track_model = RoFormer(input_dim=input_dim, d_model=d_model, num_heads=heads, num_layers=depth, dropout=dropout)
     else:
         raise NotImplementedError(f"Track Model {track_model_config['name']} not implemented")
@@ -84,9 +84,9 @@ def get_optimizer(config, model, lr):
 
 def get_lr_scheduler(config, optimizer):
     if config['name'] == 'ReduceLROnPlateau':
-        factor = config['factor']
+        factor   = config['factor']
         patience = config['patience']
-        min_lr = config['min_lr']
+        min_lr   = config['min_lr']
         return ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, min_lr=min_lr)
     else:
         raise NotImplementedError(f"LR Scheduler {config['name']} not implemented")
