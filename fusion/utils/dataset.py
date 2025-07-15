@@ -499,8 +499,8 @@ class FusedDataset(Dataset):
         images = self._process_batch(batch_file)
         image_mask = np.ones((self.image_seq_len,), dtype=np.int32)
         if images.shape[0] < self.image_seq_len:
-            images = np.concatenate([images, np.zeros((self.image_seq_len - images.shape[0], *images.shape[1:]))], axis=0)
             image_mask[images.shape[0]:] = 0
+            images = np.concatenate([images, np.zeros((self.image_seq_len - images.shape[0], *images.shape[1:]))], axis=0)
         elif images.shape[0] > self.image_seq_len:
             indices = np.linspace(0, images.shape[0] - 1, self.image_seq_len, dtype=int)
             images = images[indices]
@@ -514,8 +514,8 @@ class FusedDataset(Dataset):
         if merged_data.dtype != np.float32:
             merged_data = merged_data.astype(np.float32)
         if merged_data.shape[0] < self.track_seq_len:
-            merged_data = np.concatenate([merged_data, np.zeros((self.track_seq_len - merged_data.shape[0], TOTAL_FEATURES_PER_TIMESTEP))], axis=0)
             track_mask[merged_data.shape[0]:] = 0
+            merged_data = np.concatenate([merged_data, np.zeros((self.track_seq_len - merged_data.shape[0], TOTAL_FEATURES_PER_TIMESTEP))], axis=0)
         elif merged_data.shape[0] > self.track_seq_len:
             indices = np.linspace(0, merged_data.shape[0] - 1, self.track_seq_len, dtype=int)
             merged_data = merged_data[indices]
