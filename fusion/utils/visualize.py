@@ -6,14 +6,12 @@ import matplotlib.pyplot as plt
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
-def visualize_rd_matrix(rd_matrix, range_axis, batch, label, frame, save_path=None, verbose=False):
+def visualize_rd_matrix(rd_matrix, range_axis, velocity_axis, batch, label, frame, save_path=None, verbose=False):
     """可视化 RD 矩阵"""
     if verbose:
         print(f"RD矩阵形状: {rd_matrix.shape}")
 
     plt.figure(figsize=(10, 8))
-    h, w = rd_matrix.shape
-    velocity_axis = np.linspace(-56, 56, w)
     X, Y = np.meshgrid(velocity_axis, range_axis)
     plt.pcolormesh(X, Y, rd_matrix, shading='auto', cmap='jet')
     plt.xlim(-30, 30)

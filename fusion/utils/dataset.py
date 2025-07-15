@@ -271,19 +271,18 @@ def process_batch(batch: BatchFile):
 
                     try:
                         # MTD处理
+                        # ===== 关键修改 1：修正加窗操作 =====
                         distance_bins = data.shape[0]  # 距离单元数 (31)
                         prt_bins = data.shape[1]  # PRT数
-
-                        # 生成泰勒窗 - 使用PRT数作为窗长，匹配MATLAB
-                        mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30)
-
-                        # 在距离维度重复窗函数
-                        coef_mtd_2d = np.tile(mtd_win, (prt_bins, 1))
-
+                        # 生成泰勒窗 - 在距离维度加窗（窗长 = 距离单元数）
+                        mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
+                        # 将窗函数转换为列向量 (31×1)
+                        mtd_win_col = mtd_win.reshape(-1, 1)
+                        # 在PRT维度（列方向）重复窗函数 (31×N)
+                        coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
                         # 加窗处理
-                        data_windowed = data * coef_mtd_2d.T
-
-                        # FFT处理 - 在PRT维度（轴1）进行FFT
+                        data_windowed = data * coef_mtd_2d
+                        # FFT处理 - 在慢时间维度（轴1）进行FFT
                         mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
 
                         # 计算多普勒速度轴 - 修复溢出问题
@@ -296,7 +295,7 @@ def process_batch(batch: BatchFile):
                                 continue
 
                             # 修复溢出问题 - 使用更安全的方式
-                            half_prt = params.prt_num // 2
+                            half_prt = prt_bins // 2
 
                             # 检查half_prt是否合理
                             if half_prt <= 0 or half_prt > 10000:
@@ -304,10 +303,10 @@ def process_batch(batch: BatchFile):
                                 continue
 
                             # 使用int32避免溢出
-                            v_start = -int(half_prt)
-                            v_end = int(half_prt)
-                            v_indices = np.arange(v_start, v_end, dtype=np.int32)
-                            v_axis = v_indices.astype(np.float64) * delta_v
+                            v_axis = np.linspace(-prt_bins / 2 * delta_v,
+                                                 prt_bins / 2 * delta_v,
+                                                 prt_bins,
+                                                 endpoint=False)
 
                             # 检查v_axis是否有效
                             if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:

@@ -104,7 +104,7 @@ def val(model, val_loader, criterion, device, logger, writer, epoch, num_classes
     return val_loss, val_acc
 
 
-def test(model, train_loader, val_loader, device, logger, result_path, log_path, num_classes, use_flash_attn):
+def test(model, train_loader, val_loader, device, logger, result_path, log_path, use_flash_attn):
     logger.log("Start test on train set...")
     model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
     model.eval()
@@ -128,19 +128,24 @@ def test(model, train_loader, val_loader, device, logger, result_path, log_path,
             batch_file = batch_files[batch]
             rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
             batch_image_mask = image_mask[batch].cpu().numpy()
-            for frame in range(len(rd_matrices)):
+            if len(rd_matrices) > len(batch_image_mask):
+                rd_matrices = rd_matrices[:len(batch_image_mask)]
+                ranges = ranges[:len(batch_image_mask)]
+                velocities = velocities[:len(batch_image_mask)]
+            for frame in range(len(batch_image_mask)):
                 if not batch_image_mask[frame]:
                     break
                 frame_image = rd_matrices[frame]
                 range_axis = ranges[frame]
+                velocity_axis = velocities[frame]
                 cls = batch_file.label
                 if label[batch] == pred[batch]:
                     file_dir = os.path.join(result_path, f"train/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
                 else:
                     file_dir = os.path.join(result_path, f"train/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
                 os.makedirs(file_dir, exist_ok=True)
-                visualize.visualize_rd_matrix(frame_image, range_axis, batch_file.batch_num, pred[batch] + 1,
-                                              frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
+                visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
+                                              pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
                 visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
                 print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
 
@@ -165,19 +170,24 @@ def test(model, train_loader, val_loader, device, logger, result_path, log_path,
             batch_file = batch_files[batch]
             rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
             batch_image_mask = image_mask[batch].cpu().numpy()
-            for frame in range(len(rd_matrices)):
+            if len(rd_matrices) > len(batch_image_mask):
+                rd_matrices = rd_matrices[:len(batch_image_mask)]
+                ranges = ranges[:len(batch_image_mask)]
+                velocities = velocities[:len(batch_image_mask)]
+            for frame in range(len(batch_image_mask)):
                 if not batch_image_mask[frame]:
                     break
                 frame_image = rd_matrices[frame]
                 range_axis = ranges[frame]
+                velocity_axis = velocities[frame]
                 cls = batch_file.label
                 if label[batch] == pred[batch]:
                     file_dir = os.path.join(result_path, f"val/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
                 else:
                     file_dir = os.path.join(result_path, f"val/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
                 os.makedirs(file_dir, exist_ok=True)
-                visualize.visualize_rd_matrix(frame_image, range_axis, batch_file.batch_num, pred[batch] + 1,
-                                              frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
+                visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
+                                              pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
                 visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
                 print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
 
@@ -291,7 +301,7 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, train_loader, val_loader, device, logger, result_path, log_path, num_classes, use_flash_attn)
+        test(model, train_loader, val_loader, device, logger, result_path, log_path, use_flash_attn)
 
     logger.close()
     writer.close()
