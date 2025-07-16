@@ -9,17 +9,19 @@ class FusedModel(nn.Module):
         self.swin_transformer = rd_model
         self.roformer = track_model
         self.head = nn.Linear(self.swin_transformer.num_features + self.roformer.d_model, num_classes)
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, track_features, images, track_mask=None, image_mask=None):
         track_features = self.roformer(track_features, track_mask)
         image_features = self.swin_transformer(images, image_mask)
         features = torch.cat([track_features, image_features], dim=1)
-        return self.head(features)
+        return self.softmax(self.head(features))
 
 
 if __name__ == '__main__':
-    config_path = "../configs/fused.yaml"
     from fusion.utils import config
+
+    config_path = "../configs/fused.yaml"
     rd_model_config, track_model_config, data_config, train_config = config.get_config(config_path)
     height = train_config['height']
     width = train_config['width']

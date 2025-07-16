@@ -28,7 +28,7 @@ def get_cls(image_path: str) -> str:
     1. 鸟类飞行轨迹随机性很强
     2. 空飘球飞行轨迹无随机性，随风移动，高度变化缓慢，呈平滑曲线，速度接近环境风速（通常小于10m/s）
     3. 无人机飞行轨迹随机性中等，多呈直线/折线
-    四个类别分别用编号1、2、3、4表示，请只输出对应编号表示类别。
+    四个类别分别用编号1、2、3、4表示，请只输出对应编号表示类别，也就是说，只要数字，不要其他文字。
     '''
     image_url = {
         "url": f"data:image/jpeg;base64,{encode_image(image_path)}"
@@ -37,7 +37,7 @@ def get_cls(image_path: str) -> str:
         api_key=api_key,
     )
     completion = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         store=True,
         messages=[{
             "role": "user",
@@ -63,7 +63,20 @@ def main():
         save_path = os.path.join(CACHE_DIR, f"Trajectory_{batch_id}_{label}_{num_points}.png")
         if not os.path.exists(save_path):
             plot_3d_trajectory(point_file, save_path=save_path)
-        cls = int(get_cls(save_path))
+        cls = get_cls(save_path)
+        count = 0
+        while not cls.isdigit() or int(cls) not in range(1, NUM_CLASSES+1):
+            for i in range(NUM_CLASSES):
+                if cls.find(str(i+1)) != -1:
+                    cls = i+1
+                    break
+            else:
+                count += 1
+                if count > 3:
+                    print(f"Cannot recognize class for {point_file}")
+                    break
+                cls = get_cls(save_path)
+        cls = int(cls)
         if cls == int(label):
             corrects[cls-1] += 1
         totals[cls-1] += 1

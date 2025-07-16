@@ -27,13 +27,13 @@ def config_parser():
     return args
 
 
-def train(model, train_loader, optimizer, criterion, device, logger, writer, epoch, num_classes, use_flash_attn):
+def train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn):
     model.train()
     train_loss = 0.
     train_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
-    for i, (_, image, track_features, image_mask, track_mask, label) in enumerate(train_loader):
+    for i, (_, point_index, image, track_features, image_mask, track_mask, label) in enumerate(train_loader):
         image = image.to(device)
         track_features = track_features.to(device)
         if use_flash_attn:
@@ -42,38 +42,138 @@ def train(model, train_loader, optimizer, criterion, device, logger, writer, epo
         else:
             image = image.float()
             track_features = track_features.float()
-        image_mask = image_mask.to(device)
-        track_mask = track_mask.to(device)
         label = label.to(device)
         optimizer.zero_grad()
-        output = model(track_features, image, track_mask, image_mask)
-        loss = criterion(output, label)
+
+        cls_loss = 0.
+        begin_times = []
+        pred = []
+        for t in range(track_seq_len):
+            index_mask_t = (point_index <= t + 1)
+            image_mask_t = image_mask * index_mask_t
+            track_mask_t = track_mask.clone()
+            track_mask_t[:, t+1:] = 0
+
+            track_mask_t = track_mask_t.to(device)
+            image_mask_t = image_mask_t.to(device)
+            output_t = model(track_features, image, track_mask_t, image_mask_t)
+            output_max_t, pred_t = output_t.max(1)
+            pred_copy = pred_t.clone()
+            pred_copy[output_max_t < 0.5] = 0
+
+            begin = False
+            for j in range(len(pred_copy)):
+                if pred_copy[j] != 0 and not begin:
+                    begin = True
+                    begin_times.append(j)
+                elif pred_copy[j] == 0 and begin:
+                    pred_copy[j] = pred_t[j]
+            if not begin:
+                begin_times.append(len(pred_copy))
+            pred.append(pred_copy)
+
+            cls_loss_t = criterion(output_t, label)
+            cls_loss += cls_loss_t
+        cls_loss /= track_seq_len
+        begin_times = torch.tensor(begin_times)
+        time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
+        time_loss /= track_seq_len ** 2
+        loss = cls_loss + time_loss
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
-        _, pred = output.max(1)
+
+        pred = torch.tensor(pred).transpose(0, 1)   # [batch_size, seq_len]
         totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
-        for j in range(num_classes):
-            corrects[j] += (pred[label == j] == j).float().sum().item()
+        for j in range(len(pred)):
+            gt = label[j]
+            pred_j = pred[j]
+            unique_vals, counts = torch.unique(pred_j, return_counts=True)
+            pred_label = unique_vals[counts.argmax()]
+            if pred_label == gt:
+                corrects[gt] += 1
     train_accuracies = corrects / totals
     train_acc = corrects.sum() / totals.sum()
     train_loss = train_loss / len(train_loader)
-    writer.add_scalar("train/loss", train_loss, epoch)
-    writer.add_scalar("train/avg_acc", train_acc, epoch)
-    logger.log(
-        f"Epoch {epoch + 1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time() - train_time:.3f}s")
-    for i, acc in enumerate(train_accuracies):
-        writer.add_scalar(f"train/acc_{i}", acc, epoch)
+    return train_accuracies, train_loss, train_acc, train_time
 
 
-def val(model, val_loader, criterion, device, logger, writer, epoch, num_classes, use_flash_attn):
+def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_flash_attn):
     model.eval()
     val_loss = 0.
     val_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
     with torch.no_grad():
-        for i, (_, image, track_features, image_mask, track_mask, label) in enumerate(val_loader):
+        for i, (_, point_index, image, track_features, image_mask, track_mask, label) in enumerate(val_loader):
+            image = image.to(device)
+            track_features = track_features.to(device)
+            if use_flash_attn:
+                image = image.half()
+                track_features = track_features.half()
+            else:
+                image = image.float()
+                track_features = track_features.float()
+            label = label.to(device)
+
+            cls_loss = 0.
+            begin_times = []
+            pred = []
+            for t in range(track_seq_len):
+                index_mask_t = (point_index <= t + 1)
+                image_mask_t = image_mask * index_mask_t
+                track_mask_t = track_mask.clone()
+                track_mask_t[:, t+1:] = 0
+
+                track_mask_t = track_mask_t.to(device)
+                image_mask_t = image_mask_t.to(device)
+                output_t = model(track_features, image, track_mask_t, image_mask_t)
+                output_max_t, pred_t = output_t.max(1)
+                pred_copy = pred_t.clone()
+                pred_copy[output_max_t < 0.5] = 0
+
+                begin = False
+                for j in range(len(pred_copy)):
+                    if pred_copy[j] != 0 and not begin:
+                        begin = True
+                        begin_times.append(j)
+                    elif pred_copy[j] == 0 and begin:
+                        pred_copy[j] = pred_t[j]
+                if not begin:
+                    begin_times.append(len(pred_copy))
+                pred.append(pred_copy)
+
+                cls_loss_t = criterion(output_t, label)
+                cls_loss += cls_loss_t
+            cls_loss /= track_seq_len
+            begin_times = torch.tensor(begin_times)
+            time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
+            time_loss /= track_seq_len
+            loss = cls_loss + time_loss
+            val_loss += loss.item()
+
+            pred = torch.tensor(pred).transpose(0, 1)   # [batch_size, seq_len]
+            totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
+            for j in range(len(pred)):
+                gt = label[j]
+                pred_j = pred[j]
+                unique_vals, counts = torch.unique(pred_j, return_counts=True)
+                pred_label = unique_vals[counts.argmax()]
+                if pred_label == gt:
+                    corrects[gt] += 1
+    val_accuracies = corrects / totals
+    val_acc = corrects.sum() / totals.sum()
+    val_loss = val_loss / len(val_loader)
+
+    return val_accuracies, val_loss, val_acc, val_time
+
+
+def test(model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn):
+    logger.log("Start test on train set...")
+    model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
+    model.eval()
+    with torch.no_grad():
+        for i, (batch_files, point_index, image, track_features, image_mask, track_mask, label) in enumerate(train_loader):
             image = image.to(device)
             track_features = track_features.to(device)
             if use_flash_attn:
@@ -85,111 +185,131 @@ def val(model, val_loader, criterion, device, logger, writer, epoch, num_classes
             image_mask = image_mask.to(device)
             track_mask = track_mask.to(device)
             label = label.to(device)
-            output = model(track_features, image, track_mask, image_mask)
-            loss = criterion(output, label)
-            val_loss += loss.item()
-            _, pred = output.max(1)
-            totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
-            for j in range(num_classes):
-                corrects[j] += (pred[label == j] == j).float().sum().item()
-    val_accuracies = corrects / totals
-    val_acc = corrects.sum() / totals.sum()
-    val_loss = val_loss / len(val_loader)
-    writer.add_scalar("val/loss", val_loss, epoch)
-    writer.add_scalar("val/avg_acc", val_acc, epoch)
-    logger.log(
-        f"\n\tVal Loss: {val_loss:.3f}\n\tVal Accuracy: {val_acc:.3f}\n\tVal Time: {time.time() - val_time:.3f}s")
-    for i, acc in enumerate(val_accuracies):
-        writer.add_scalar(f"val/acc_{i}", acc, epoch)
-    return val_loss, val_acc
 
+            pred = []
+            for t in range(track_seq_len):
+                index_mask_t = (point_index <= t + 1).to(device)
+                image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                track_features_t = track_features[:, :, :t+1, :]
+                image_mask_t = image_mask * index_mask_t
+                track_mask_t = track_mask[:, :t+1]
+                output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
+                output_max_t, pred_t = output_t.max(1)
+                pred_copy = pred_t.clone()
+                pred_copy[output_max_t < 0.5] = 0
 
-def test(model, train_loader, val_loader, device, logger, result_path, log_path, use_flash_attn):
-    logger.log("Start test on train set...")
-    model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
-    model.eval()
-    for i, (batch_files, image, track_features, image_mask, track_mask, label) in enumerate(train_loader):
-        image = image.to(device)
-        track_features = track_features.to(device)
-        if use_flash_attn:
-            image = image.half()
-            track_features = track_features.half()
-        else:
-            image = image.float()
-            track_features = track_features.float()
-        image_mask = image_mask.to(device)
-        track_mask = track_mask.to(device)
-        label = label.to(device)
-        output = model(track_features, image, track_mask, image_mask)
-        _, pred = output.max(1)
-        label = label.cpu().numpy()
-        pred = pred.cpu().numpy()
-        for batch in range(len(batch_files)):
-            batch_file = batch_files[batch]
-            rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
-            batch_image_mask = image_mask[batch].cpu().numpy()
-            if len(rd_matrices) > len(batch_image_mask):
-                rd_matrices = rd_matrices[:len(batch_image_mask)]
-                ranges = ranges[:len(batch_image_mask)]
-                velocities = velocities[:len(batch_image_mask)]
-            for frame in range(len(batch_image_mask)):
-                if not batch_image_mask[frame]:
-                    break
-                frame_image = rd_matrices[frame]
-                range_axis = ranges[frame]
-                velocity_axis = velocities[frame]
+                begin = False
+                for j in range(len(pred_copy)):
+                    if pred_copy[j] != 0 and not begin:
+                        begin = True
+                    elif pred_copy[j] == 0 and begin:
+                        pred_copy[j] = pred_t[j]
+                if not begin:
+                    pred.append(pred_copy)
+
+            pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
+            label = label.cpu().numpy()
+            for batch in range(len(batch_files)):
+                batch_file = batch_files[batch]
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
+                batch_image_mask = image_mask[batch].cpu().numpy()
+                if len(rd_matrices) > len(batch_image_mask):
+                    rd_matrices = rd_matrices[:len(batch_image_mask)]
+                    ranges = ranges[:len(batch_image_mask)]
+                    velocities = velocities[:len(batch_image_mask)]
+
                 cls = batch_file.label
-                if label[batch] == pred[batch]:
-                    file_dir = os.path.join(result_path, f"train/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                else:
-                    file_dir = os.path.join(result_path, f"train/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                os.makedirs(file_dir, exist_ok=True)
-                visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
-                                              pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
-                visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
-                print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
+                batch_pred = pred[batch]
+                unique_vals, counts = torch.unique(batch_pred, return_counts=True)
+                pred_label = unique_vals[counts.argmax()]
+
+                for frame in range(len(batch_image_mask)):
+                    if not batch_image_mask[frame]:
+                        break
+                    frame_image = rd_matrices[frame]
+                    range_axis = ranges[frame]
+                    velocity_axis = velocities[frame]
+
+                    if label[batch] == pred_label:
+                        file_dir = os.path.join(result_path, f"train/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
+                    else:
+                        file_dir = os.path.join(result_path, f"train/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
+                    os.makedirs(file_dir, exist_ok=True)
+
+                    visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
+                                                  pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
+                    visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
+                    print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
 
     logger.log("Start test on val set...")
-    for i, (batch_files, image, track_features, image_mask, track_mask, label) in enumerate(val_loader):
-        image = image.to(device)
-        track_features = track_features.to(device)
-        if use_flash_attn:
-            image = image.half()
-            track_features = track_features.half()
-        else:
-            image = image.float()
-            track_features = track_features.float()
-        image_mask = image_mask.to(device)
-        track_mask = track_mask.to(device)
-        label = label.to(device)
-        output = model(track_features, image, track_mask, image_mask)
-        _, pred = output.max(1)
-        label = label.cpu().numpy()
-        pred = pred.cpu().numpy()
-        for batch in range(len(batch_files)):
-            batch_file = batch_files[batch]
-            rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
-            batch_image_mask = image_mask[batch].cpu().numpy()
-            if len(rd_matrices) > len(batch_image_mask):
-                rd_matrices = rd_matrices[:len(batch_image_mask)]
-                ranges = ranges[:len(batch_image_mask)]
-                velocities = velocities[:len(batch_image_mask)]
-            for frame in range(len(batch_image_mask)):
-                if not batch_image_mask[frame]:
-                    break
-                frame_image = rd_matrices[frame]
-                range_axis = ranges[frame]
-                velocity_axis = velocities[frame]
+    with torch.no_grad():
+        for i, (batch_files, point_index, image, track_features, image_mask, track_mask, label) in enumerate(val_loader):
+            image = image.to(device)
+            track_features = track_features.to(device)
+            if use_flash_attn:
+                image = image.half()
+                track_features = track_features.half()
+            else:
+                image = image.float()
+                track_features = track_features.float()
+            image_mask = image_mask.to(device)
+            track_mask = track_mask.to(device)
+            label = label.to(device)
+
+            pred = []
+            for t in range(track_seq_len):
+                index_mask_t = (point_index <= t + 1).to(device)
+                image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+                track_features_t = track_features[:, :, :t+1, :]
+                image_mask_t = image_mask * index_mask_t
+                track_mask_t = track_mask[:, :t+1]
+                output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
+                output_max_t, pred_t = output_t.max(1)
+                pred_copy = pred_t.clone()
+                pred_copy[output_max_t < 0.5] = 0
+
+                begin = False
+                for j in range(len(pred_copy)):
+                    if pred_copy[j] != 0 and not begin:
+                        begin = True
+                    elif pred_copy[j] == 0 and begin:
+                        pred_copy[j] = pred_t[j]
+                if not begin:
+                    pred.append(pred_copy)
+
+            pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
+            label = label.cpu().numpy()
+            for batch in range(len(batch_files)):
+                batch_file = batch_files[batch]
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
+                batch_image_mask = image_mask[batch].cpu().numpy()
+                if len(rd_matrices) > len(batch_image_mask):
+                    rd_matrices = rd_matrices[:len(batch_image_mask)]
+                    ranges = ranges[:len(batch_image_mask)]
+                    velocities = velocities[:len(batch_image_mask)]
+
                 cls = batch_file.label
-                if label[batch] == pred[batch]:
-                    file_dir = os.path.join(result_path, f"val/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                else:
-                    file_dir = os.path.join(result_path, f"val/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                os.makedirs(file_dir, exist_ok=True)
-                visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
-                                              pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
-                visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
-                print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
+                batch_pred = pred[batch]
+                unique_vals, counts = torch.unique(batch_pred, return_counts=True)
+                pred_label = unique_vals[counts.argmax()]
+
+                for frame in range(len(batch_image_mask)):
+                    if not batch_image_mask[frame]:
+                        break
+                    frame_image = rd_matrices[frame]
+                    range_axis = ranges[frame]
+                    velocity_axis = velocities[frame]
+
+                    if label[batch] == pred_label:
+                        file_dir = os.path.join(result_path, f"val/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
+                    else:
+                        file_dir = os.path.join(result_path, f"val/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
+                    os.makedirs(file_dir, exist_ok=True)
+
+                    visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
+                                                  pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
+                    visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
+                    print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
 
 
 def save_model(model, optimizer, lr_scheduler, epoch, best_acc, filename):
@@ -286,8 +406,25 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
 
     for epoch in range(start_epoch, epochs):
-        train(model, train_loader, optimizer, criterion, device, logger, writer, epoch, num_classes, use_flash_attn)
-        val_loss, val_acc = val(model, val_loader, criterion, device, logger, writer, epoch, num_classes, use_flash_attn)
+        train_accuracies, train_loss, train_acc, train_time = \
+            train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn)
+
+        writer.add_scalar("train/loss", train_loss, epoch)
+        writer.add_scalar("train/avg_acc", train_acc, epoch)
+        logger.log(
+            f"Epoch {epoch + 1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time() - train_time:.3f}s")
+        for i, acc in enumerate(train_accuracies):
+            writer.add_scalar(f"train/acc_{i}", acc, epoch)
+
+        val_accuracies, val_loss, val_acc, val_time = \
+            val(model, val_loader, criterion, device, num_classes, track_seq_len, use_flash_attn)
+
+        writer.add_scalar("val/loss", val_loss, epoch)
+        writer.add_scalar("val/avg_acc", val_acc, epoch)
+        logger.log(
+            f"\n\tVal Loss: {val_loss:.3f}\n\tVal Accuracy: {val_acc:.3f}\n\tVal Time: {time.time() - val_time:.3f}s")
+        for i, acc in enumerate(val_accuracies):
+            writer.add_scalar(f"val/acc_{i}", acc, epoch)
 
         lr_scheduler.step(val_loss)
         if val_acc > best_acc:
@@ -301,7 +438,7 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, train_loader, val_loader, device, logger, result_path, log_path, use_flash_attn)
+        test(model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn)
 
     logger.close()
     writer.close()
