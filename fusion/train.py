@@ -197,7 +197,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
             label = label.to(device)
 
             pred = []
-            for t in range(track_seq_len):
+            for t in tqdm(range(track_seq_len)):
                 index_mask_t = (point_index <= t + 1).to(device)
                 image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 track_features_t = track_features[:, :, :t+1, :]
@@ -220,7 +220,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                 del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
                 torch.cuda.empty_cache()
 
-            pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
+            pred = np.array(pred).T   # [batch_size, seq_len]
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
@@ -233,7 +233,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
 
                 cls = batch_file.label
                 batch_pred = pred[batch]
-                unique_vals, counts = torch.unique(batch_pred, return_counts=True)
+                unique_vals, counts = np.unique(batch_pred, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
 
                 for frame in range(len(batch_image_mask)):
@@ -270,7 +270,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
             label = label.to(device)
 
             pred = []
-            for t in range(track_seq_len):
+            for t in tqdm(range(track_seq_len)):
                 index_mask_t = (point_index <= t + 1).to(device)
                 image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
                 track_features_t = track_features[:, :, :t+1, :]
@@ -293,7 +293,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                 del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
                 torch.cuda.empty_cache()
 
-            pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
+            pred = np.array(pred).T   # [batch_size, seq_len]
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
@@ -306,7 +306,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
 
                 cls = batch_file.label
                 batch_pred = pred[batch]
-                unique_vals, counts = torch.unique(batch_pred, return_counts=True)
+                unique_vals, counts = np.unique(batch_pred, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
 
                 for frame in range(len(batch_image_mask)):
