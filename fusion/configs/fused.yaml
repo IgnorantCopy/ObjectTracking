@@ -6,7 +6,7 @@ rd_model:
   embed_dim: 96
   depths: [ 2, 2 ]
   heads: [ 3, 6 ]
-  window_depth: 5
+  window_depth: 2
   window_height: 4
   window_width: 4
   ff_ratio: 4.0
@@ -32,7 +32,7 @@ data:
   data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集
   val_ratio: 0.2
   shuffle: True
-  image_seq_len: 180
+  image_seq_len: 64
   track_seq_len: 29
 
 

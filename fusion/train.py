@@ -2,6 +2,7 @@ import argparse
 import os
 import time
 from datetime import datetime
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
@@ -48,7 +49,7 @@ def train(model, train_loader, optimizer, criterion, device, num_classes, track_
         cls_loss = 0.
         begin_times = []
         pred = []
-        for t in range(track_seq_len):
+        for t in tqdm(range(track_seq_len), desc="Flow Prediction"):
             index_mask_t = (point_index <= t + 1)
             image_mask_t = image_mask * index_mask_t
             track_mask_t = track_mask.clone()
@@ -74,6 +75,10 @@ def train(model, train_loader, optimizer, criterion, device, num_classes, track_
 
             cls_loss_t = criterion(output_t, label)
             cls_loss += cls_loss_t
+            # 释放显存
+            del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+            torch.cuda.empty_cache()
+
         cls_loss /= track_seq_len
         begin_times = torch.tensor(begin_times)
         time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
@@ -83,12 +88,13 @@ def train(model, train_loader, optimizer, criterion, device, num_classes, track_
         optimizer.step()
         train_loss += loss.item()
 
-        pred = torch.tensor(pred).transpose(0, 1)   # [batch_size, seq_len]
-        totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
+        pred = np.array(pred).T   # [batch_size, seq_len]
+        label = label.cpu().numpy()
+        totals += np.bincount(label, minlength=num_classes)
         for j in range(len(pred)):
             gt = label[j]
             pred_j = pred[j]
-            unique_vals, counts = torch.unique(pred_j, return_counts=True)
+            unique_vals, counts = np.unique(pred_j, return_counts=True)
             pred_label = unique_vals[counts.argmax()]
             if pred_label == gt:
                 corrects[gt] += 1
@@ -119,7 +125,7 @@ def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_fl
             cls_loss = 0.
             begin_times = []
             pred = []
-            for t in range(track_seq_len):
+            for t in tqdm(range(track_seq_len), desc="Flow Prediction"):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
                 track_mask_t = track_mask.clone()
@@ -141,10 +147,13 @@ def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_fl
                         pred_copy[j] = pred_t[j]
                 if not begin:
                     begin_times.append(len(pred_copy))
-                pred.append(pred_copy)
+                pred.append(pred_copy.cpu().tolist())
 
                 cls_loss_t = criterion(output_t, label)
                 cls_loss += cls_loss_t
+                # 释放显存
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                torch.cuda.empty_cache()
             cls_loss /= track_seq_len
             begin_times = torch.tensor(begin_times)
             time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
@@ -152,12 +161,13 @@ def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_fl
             loss = cls_loss + time_loss
             val_loss += loss.item()
 
-            pred = torch.tensor(pred).transpose(0, 1)   # [batch_size, seq_len]
-            totals += np.bincount(label.cpu().numpy(), minlength=num_classes)
+            pred = np.array(pred).T   # [batch_size, seq_len]
+            label = label.cpu().numpy()
+            totals += np.bincount(label, minlength=num_classes)
             for j in range(len(pred)):
                 gt = label[j]
                 pred_j = pred[j]
-                unique_vals, counts = torch.unique(pred_j, return_counts=True)
+                unique_vals, counts = np.unique(pred_j, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
                 if pred_label == gt:
                     corrects[gt] += 1
@@ -206,6 +216,9 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                         pred_copy[j] = pred_t[j]
                 if not begin:
                     pred.append(pred_copy)
+
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                torch.cuda.empty_cache()
 
             pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
             label = label.cpu().numpy()
@@ -276,6 +289,9 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                         pred_copy[j] = pred_t[j]
                 if not begin:
                     pred.append(pred_copy)
+
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                torch.cuda.empty_cache()
 
             pred = torch.tensor(pred).transpose(0, 1)  # [batch_size, seq_len]
             label = label.cpu().numpy()
@@ -406,15 +422,17 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
 
     for epoch in range(start_epoch, epochs):
-        train_accuracies, train_loss, train_acc, train_time = \
-            train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn)
+        logger.log(f'------------------- Epoch {epoch + 1}/{epochs} -------------------')
 
-        writer.add_scalar("train/loss", train_loss, epoch)
-        writer.add_scalar("train/avg_acc", train_acc, epoch)
-        logger.log(
-            f"Epoch {epoch + 1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time() - train_time:.3f}s")
-        for i, acc in enumerate(train_accuracies):
-            writer.add_scalar(f"train/acc_{i}", acc, epoch)
+        # train_accuracies, train_loss, train_acc, train_time = \
+        #     train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn)
+        #
+        # writer.add_scalar("train/loss", train_loss, epoch)
+        # writer.add_scalar("train/avg_acc", train_acc, epoch)
+        # logger.log(
+        #     f"Epoch {epoch + 1}:\n\tTrain Loss: {train_loss:.3f}\n\tTrain Accuracy: {train_acc:.3f}\n\tTrain Time: {time.time() - train_time:.3f}s")
+        # for i, acc in enumerate(train_accuracies):
+        #     writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
         val_accuracies, val_loss, val_acc, val_time = \
             val(model, val_loader, criterion, device, num_classes, track_seq_len, use_flash_attn)
@@ -433,7 +451,6 @@ def main():
             logger.log(f"Best model saved with acc: {best_acc:.3f}")
         save_model(model, optimizer, lr_scheduler, epoch, best_acc, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)
-        logger.log('-' * 50)
     logger.log(f"Max GPU Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
 
     if result_path:

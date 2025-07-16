@@ -517,8 +517,10 @@ class FusedDataset(Dataset):
                 np.array([point_index[-1] for _ in range(self.image_seq_len - point_index.shape[0])])
             ], axis=0)
         elif images.shape[0] > self.image_seq_len:
-            images = images[:self.image_seq_len]
-            point_index = point_index[:self.image_seq_len]
+            quantiles = np.linspace(0, 1, self.image_seq_len)
+            indices = np.floor(quantiles * (images.shape[0] - 1)).astype(int)
+            images = images[indices]
+            point_index = point_index[indices]
         assert images.shape[0] == self.image_seq_len, f"RD 图数量与预期不符: {images.shape[0]}, {self.image_seq_len}"
 
         # load point and track data
