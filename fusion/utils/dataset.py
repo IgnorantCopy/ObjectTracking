@@ -549,6 +549,7 @@ class FusedDataset(Dataset):
         frame_count = 0
         rd_matrices = []
         point_index = []
+        label = batch.label
         try:
             with open(batch.raw_file, 'rb') as fid:
                 while True:
@@ -681,8 +682,9 @@ class FusedDataset(Dataset):
                         rd_matrix = np.clip(rd_matrix, 1e-10, 1000)
                         rd_matrix = 20 * np.log10(rd_matrix)
                         velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
-                        rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
-                        rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
+                        if label <= 3:
+                            rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
+                        # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                         rd_matrix = rd_matrix[:, :, None]
                         if self.image_transform:
                             rd_matrix = self.image_transform(rd_matrix)
