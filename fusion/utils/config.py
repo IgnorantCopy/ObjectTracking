@@ -1,4 +1,6 @@
 import os
+
+import torch
 import yaml
 import torch.nn as nn
 import torch.optim as optim
@@ -20,7 +22,7 @@ def check_paths(*paths):
 def get_config(config_path: str):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    return config["rd_model"], config["track_model"], config["data"], config["train"]
+    return config["rd_model"], config["track_model"], config['fc_model'], config["data"], config["train"]
 
 
 def get_model(rd_model_config, track_model_config, channels, num_classes):
@@ -68,6 +70,22 @@ def get_model(rd_model_config, track_model_config, channels, num_classes):
         raise NotImplementedError(f"Track Model {track_model_config['name']} not implemented")
 
     return FusedModel(rd_model, track_model, num_classes)
+
+
+def get_fc_model(fc_model_config, num_classes):
+    if fc_model_config:
+        from fusion.models.fc import FC
+
+        input_dim = fc_model_config["input_dim"]
+        hidden_dim = fc_model_config["hidden_dim"]
+        dropout = fc_model_config["dropout"]
+        pretrained = fc_model_config["pretrained"]
+        model = FC(input_dim=input_dim, output_dim=num_classes, hidden_dim=hidden_dim, dropout=dropout)
+        model.load_state_dict(torch.load(pretrained, weights_only=False)['state_dict'])
+    else:
+        raise ValueError("FC model config is None")
+
+    return model
 
 
 def get_optimizer(config, model, lr):

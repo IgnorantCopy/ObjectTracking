@@ -1,0 +1,31 @@
+model:
+  name: fc
+  hidden_dim: 256
+  dropout: 0.2
+
+
+data:
+  data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/noise_cls
+  val_ratio: 0.2
+  shuffle: True
+
+
+train:
+  batch_size: 128
+  num_workers: 4
+  num_epochs: 100
+  lr: 0.01
+  num_classes: 2
+  input_dim: 31
+  lr_scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
+  optimizer:
+    name: SGD
+    momentum: 0.9
+    weight_decay: 0.0005
+  loss:
+    name: CrossEntropyLoss
+

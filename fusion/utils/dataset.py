@@ -484,7 +484,7 @@ def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
 
 
 class FusedDataset(Dataset):
-    def __init__(self, batch_files: list[BatchFile], image_transform=None, track_transform=None,
+    def __init__(self, batch_files: list[BatchFile], fc_model, image_transform=None, track_transform=None,
                  image_seq_len=180, track_seq_len=29):
         super().__init__()
         self.batch_files = batch_files
@@ -492,6 +492,7 @@ class FusedDataset(Dataset):
         self.track_transform = track_transform
         self.image_seq_len = image_seq_len
         self.track_seq_len = track_seq_len
+        self.fc_model = fc_model
 
     def __len__(self):
         return len(self.batch_files)
@@ -679,11 +680,25 @@ class FusedDataset(Dataset):
                         velocity_mask = np.reshape(np.abs(velocity_axis) < 56, -1)
                         rd_matrix = rd_matrix[:, velocity_mask]
                         rd_matrix = np.abs(rd_matrix)
-                        rd_matrix = np.clip(rd_matrix, 1e-10, 1000)
+                        rd_matrix = np.clip(rd_matrix, 1e-10, 1e10)
                         rd_matrix = 20 * np.log10(rd_matrix)
                         velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
-                        if label <= 3:
-                            rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
+
+                        for i in range(3):
+                            col1 = rd_matrix[:, velocity_index + i]
+                            col2 = rd_matrix[:, velocity_index - i]
+                            col1 = torch.from_numpy(col1).unsqueeze(1).float().to(self.fc_model.device)
+                            col2 = torch.from_numpy(col2).unsqueeze(1).float().to(self.fc_model.device)
+                            col_concat = torch.cat([col1, col2], dim=1)
+                            output = self.fc_model(col_concat)
+                            _, pred = torch.max(output, 1)
+                            if pred[0].item() == 0:
+                                rd_matrix[:, velocity_index + i] = 0
+                            if pred[1].item() == 0:
+                                rd_matrix[:, velocity_index - i] = 0
+                            if pred[0].item() == 1 or pred[1].item() == 1:
+                                break
+
                         # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                         rd_matrix = rd_matrix[:, :, None]
                         if self.image_transform:

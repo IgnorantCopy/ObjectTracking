@@ -28,6 +28,13 @@ track_model:
   dropout: 0.15
 
 
+fc_model:
+  input_dim: 31
+  hidden_dim: 256
+  dropout: 0.2
+  pretrained: ./ckpt/fc_model.pth
+
+
 data:
   data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集
   val_ratio: 0.2
@@ -39,7 +46,7 @@ data:
 train:
   batch_size: 16
   num_workers: 4
-  num_epochs: 1
+  num_epochs: 100
   lr: 0.01
   height: 32
   width: 544

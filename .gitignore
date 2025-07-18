@@ -180,3 +180,4 @@ frame_wise/logs
 src/
 seq_wise/logs/
 fusion/logs/
+noise_cls/logs/

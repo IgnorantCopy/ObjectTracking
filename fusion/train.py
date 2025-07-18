@@ -82,9 +82,9 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             torch.cuda.empty_cache()
 
         cls_loss /= track_seq_len
-        begin_times = torch.tensor(begin_times)
+        begin_times = torch.tensor(begin_times, dtype=torch.float, device=device)
         train_max_begin_time = max(train_max_begin_time, begin_times.max().item())
-        time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
+        time_loss = nn.MSELoss()(begin_times, torch.zeros_like(begin_times))
         time_loss /= track_seq_len ** 2
         loss = alpha * cls_loss + (1 - alpha) * time_loss
         loss.backward()
@@ -101,8 +101,10 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             pred_label = unique_vals[counts.argmax()]
             if pred_label == gt:
                 corrects[gt] += 1
-    train_accuracies = corrects / totals
+
     train_acc = corrects.sum() / totals.sum()
+    totals[totals == 0] = 1
+    train_accuracies = corrects / totals
     train_loss = train_loss / len(train_loader)
     return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time
 
@@ -115,7 +117,8 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
     corrects = np.array([0. for _ in range(num_classes)])
     val_max_begin_time = 0
     with torch.no_grad():
-        for i, (_, point_index, image, track_features, image_mask, track_mask, label) in tqdm(enumerate(val_loader), desc="Validation"):
+        for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
+                in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
             image = image.to(device)
             track_features = track_features.to(device)
             if use_flash_attn:
@@ -176,8 +179,9 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 pred_label = unique_vals[counts.argmax()]
                 if pred_label == gt:
                     corrects[gt] += 1
-    val_accuracies = corrects / totals
     val_acc = corrects.sum() / totals.sum()
+    totals[totals == 0] = 1
+    val_accuracies = corrects / totals
     val_loss = val_loss / len(val_loader)
 
     return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time
@@ -357,7 +361,7 @@ def main():
     config.check_paths(log_path)
     writer = SummaryWriter(log_dir=log_path)
     logger = Logger(os.path.join(log_path, "train.txt"))
-    rd_model_config, track_model_config, data_config, train_config = config.get_config(config_path)
+    rd_model_config, track_model_config, fc_model_config, data_config, train_config = config.get_config(config_path)
 
     use_flash_attn = rd_model_config['name'] in ['Vit', 'ViViT']
 
@@ -418,11 +422,16 @@ def main():
         model.half()
     model.to(device)
 
+    fc_model = config.get_fc_model(fc_model_config, num_classes=2)
+    fc_model.to(device)
+
     train_transform, val_transform = config.get_transform(channels, height, width)
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.FusedDataset(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
+    train_dataset = dataset.FusedDataset(train_batch_files, fc_model,
+                                         image_transform=train_transform, image_seq_len=image_seq_len,
                                          track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
+    val_dataset = dataset.FusedDataset(val_batch_files, fc_model,
+                                       image_transform=val_transform, image_seq_len=image_seq_len,
                                        track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
