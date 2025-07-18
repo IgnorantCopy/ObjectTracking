@@ -62,14 +62,14 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             output_t = model(track_features, image, track_mask_t, image_mask_t)
             output_max_t, pred_t = output_t.max(1)
             pred_copy = pred_t.clone()
-            pred_copy[output_max_t < 0.5] = 0
+            pred_copy[output_max_t < 0.5] = -1
 
             begin = False
             for j in range(len(pred_copy)):
-                if pred_copy[j] != 0 and not begin:
+                if pred_copy[j] != -1 and not begin:
                     begin = True
                     begin_times.append(j)
-                elif pred_copy[j] == 0 and begin:
+                elif pred_copy[j] == -1 and begin:
                     pred_copy[j] = pred_t[j]
             if not begin:
                 begin_times.append(len(pred_copy))
@@ -97,6 +97,9 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
         for j in range(len(pred)):
             gt = label[j]
             pred_j = pred[j]
+            pred_j = pred_j[pred_j != -1]
+            if len(pred_j) == 0:
+                continue
             unique_vals, counts = np.unique(pred_j, return_counts=True)
             pred_label = unique_vals[counts.argmax()]
             if pred_label == gt:
@@ -143,14 +146,14 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 output_t = model(track_features, image, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = 0
+                pred_copy[output_max_t < 0.5] = -1
 
                 begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != 0 and not begin:
+                    if pred_copy[j] != -1 and not begin:
                         begin = True
                         begin_times.append(j)
-                    elif pred_copy[j] == 0 and begin:
+                    elif pred_copy[j] == -1 and begin:
                         pred_copy[j] = pred_t[j]
                 if not begin:
                     begin_times.append(len(pred_copy))
@@ -175,6 +178,9 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
             for j in range(len(pred)):
                 gt = label[j]
                 pred_j = pred[j]
+                pred_j = pred_j[pred_j != -1]
+                if len(pred_j) == 0:
+                    continue
                 unique_vals, counts = np.unique(pred_j, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
                 if pred_label == gt:
@@ -187,7 +193,7 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
     return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time
 
 
-def test(model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn):
+def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn):
     logger.log("Start test on train set...")
     model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
     model.eval()
@@ -216,13 +222,13 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                 output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = 0
+                pred_copy[output_max_t < 0.5] = -1
 
                 begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != 0 and not begin:
+                    if pred_copy[j] != -1 and not begin:
                         begin = True
-                    elif pred_copy[j] == 0 and begin:
+                    elif pred_copy[j] == -1 and begin:
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
@@ -233,7 +239,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file, fc_model, device)
                 batch_image_mask = image_mask[batch].cpu().numpy()
                 if len(rd_matrices) > len(batch_image_mask):
                     rd_matrices = rd_matrices[:len(batch_image_mask)]
@@ -242,8 +248,12 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
 
                 cls = batch_file.label
                 batch_pred = pred[batch]
-                unique_vals, counts = np.unique(batch_pred, return_counts=True)
-                pred_label = unique_vals[counts.argmax()]
+                batch_pred = batch_pred[batch_pred != -1]
+                if len(batch_pred) == 0:
+                    pred_label = -1
+                else:
+                    unique_vals, counts = np.unique(batch_pred, return_counts=True)
+                    pred_label = unique_vals[counts.argmax()]
 
                 for frame in range(len(batch_image_mask)):
                     if not batch_image_mask[frame]:
@@ -289,13 +299,13 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
                 output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = 0
+                pred_copy[output_max_t < 0.5] = -1
 
                 begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != 0 and not begin:
+                    if pred_copy[j] != -1 and not begin:
                         begin = True
-                    elif pred_copy[j] == 0 and begin:
+                    elif pred_copy[j] == -1 and begin:
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
@@ -306,7 +316,7 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file, fc_model, device)
                 batch_image_mask = image_mask[batch].cpu().numpy()
                 if len(rd_matrices) > len(batch_image_mask):
                     rd_matrices = rd_matrices[:len(batch_image_mask)]
@@ -315,8 +325,12 @@ def test(model, train_loader, val_loader, device, track_seq_len, logger, result_
 
                 cls = batch_file.label
                 batch_pred = pred[batch]
-                unique_vals, counts = np.unique(batch_pred, return_counts=True)
-                pred_label = unique_vals[counts.argmax()]
+                batch_pred = batch_pred[batch_pred != -1]
+                if len(batch_pred) == 0:
+                    pred_label = -1
+                else:
+                    unique_vals, counts = np.unique(batch_pred, return_counts=True)
+                    pred_label = unique_vals[counts.argmax()]
 
                 for frame in range(len(batch_image_mask)):
                     if not batch_image_mask[frame]:
@@ -427,10 +441,10 @@ def main():
 
     train_transform, val_transform = config.get_transform(channels, height, width)
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.FusedDataset(train_batch_files, fc_model,
+    train_dataset = dataset.FusedDataset(train_batch_files, fc_model, device,
                                          image_transform=train_transform, image_seq_len=image_seq_len,
                                          track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.FusedDataset(val_batch_files, fc_model,
+    val_dataset = dataset.FusedDataset(val_batch_files, fc_model, device,
                                        image_transform=val_transform, image_seq_len=image_seq_len,
                                        track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
@@ -476,7 +490,7 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn)
+        test(model, fc_model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn)
 
     logger.close()
     writer.close()

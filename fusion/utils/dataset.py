@@ -243,7 +243,7 @@ def read_raw_data(fid):
         return None, None
 
 
-def process_batch(batch: BatchFile):
+def process_batch(batch: BatchFile, model, device):
     """处理单个批次的数据"""
     # 打开原始数据文件
     frame_count = 0
@@ -383,11 +383,25 @@ def process_batch(batch: BatchFile):
                     velocity_axis = velocity_axis[velocity_mask]
                     rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
                     rd_matrix = np.abs(rd_matrix)
-                    rd_matrix = np.clip(rd_matrix, 1e-10, 1000)
+                    rd_matrix = np.clip(rd_matrix, 1e-10, 1e10)
                     rd_matrix = 20 * np.log10(rd_matrix)
                     velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
-                    rd_matrix[:, velocity_index - 4:velocity_index + 3] = 0
-                    rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
+
+                    for i in range(3):
+                        col1 = rd_matrix[:, velocity_index + i]
+                        col2 = rd_matrix[:, velocity_index - i]
+                        col1 = torch.from_numpy(col1).float()
+                        col2 = torch.from_numpy(col2).float()
+                        col_concat = torch.stack([col1, col2]).to(device)
+                        output = model(col_concat)
+                        _, pred = torch.max(output, 1)
+                        if pred[0].item() == 0:
+                            rd_matrix[:, velocity_index + i] = 0
+                        if pred[1].item() == 0:
+                            rd_matrix[:, velocity_index - i] = 0
+                        if pred[0].item() == 1 or pred[1].item() == 1:
+                            break
+
                     rd_matrices.append(rd_matrix)
                     ranges.append(range_axis)
                     velocities.append(velocity_axis)
@@ -484,7 +498,7 @@ def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
 
 
 class FusedDataset(Dataset):
-    def __init__(self, batch_files: list[BatchFile], fc_model, image_transform=None, track_transform=None,
+    def __init__(self, batch_files: list[BatchFile], fc_model, device, image_transform=None, track_transform=None,
                  image_seq_len=180, track_seq_len=29):
         super().__init__()
         self.batch_files = batch_files
@@ -493,6 +507,7 @@ class FusedDataset(Dataset):
         self.image_seq_len = image_seq_len
         self.track_seq_len = track_seq_len
         self.fc_model = fc_model
+        self.device = device
 
     def __len__(self):
         return len(self.batch_files)
@@ -677,8 +692,9 @@ class FusedDataset(Dataset):
                         # 保存MTD处理结果
                         rd_matrix = mtd_result
                         velocity_axis = v_axis
-                        velocity_mask = np.reshape(np.abs(velocity_axis) < 56, -1)
-                        rd_matrix = rd_matrix[:, velocity_mask]
+                        velocity_mask = np.abs(velocity_axis) < 56
+                        velocity_axis = velocity_axis[velocity_mask]
+                        rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
                         rd_matrix = np.abs(rd_matrix)
                         rd_matrix = np.clip(rd_matrix, 1e-10, 1e10)
                         rd_matrix = 20 * np.log10(rd_matrix)
@@ -687,9 +703,9 @@ class FusedDataset(Dataset):
                         for i in range(3):
                             col1 = rd_matrix[:, velocity_index + i]
                             col2 = rd_matrix[:, velocity_index - i]
-                            col1 = torch.from_numpy(col1).unsqueeze(1).float().to(self.fc_model.device)
-                            col2 = torch.from_numpy(col2).unsqueeze(1).float().to(self.fc_model.device)
-                            col_concat = torch.cat([col1, col2], dim=1)
+                            col1 = torch.from_numpy(col1).float()
+                            col2 = torch.from_numpy(col2).float()
+                            col_concat = torch.stack([col1, col2]).to(self.device)
                             output = self.fc_model(col_concat)
                             _, pred = torch.max(output, 1)
                             if pred[0].item() == 0:
@@ -812,6 +828,7 @@ def collate_fn(batch):
 
 if __name__ == '__main__':
     from visualize import visualize_rd_matrix
+    from fusion.models.fc import FC
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
     batch = 1333
@@ -819,5 +836,9 @@ if __name__ == '__main__':
     batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
                            os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_25.txt"),
                            os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_25.txt"))
-    rd_matrices, ranges, velocities = process_batch(batch_file)
+    model = FC(31, 2, 256, 0.2)
+    model.load_state_dict(torch.load("../ckpt/fc_model.pth", weights_only=False)['state_dict'])
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    rd_matrices, ranges, velocities = process_batch(batch_file, model, device)
     visualize_rd_matrix(rd_matrices[9], ranges[9], velocities[9], batch, label, 9)
