@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
+import multiprocessing
 
 from utils import config, dataset, visualize
 from utils.logger import Logger
@@ -28,13 +29,14 @@ def config_parser():
     return args
 
 
-def train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
+def train(model, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
     model.train()
     train_loss = 0.
     train_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
     train_max_begin_time = 0
+    train_avg_rate = 0.
     for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
             in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
         image = image.to(device)
@@ -49,8 +51,9 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
         optimizer.zero_grad()
 
         cls_loss = 0.
-        begin_times = []
+        begin_times = [track_seq_len for _ in range(len(image))]
         pred = []
+        begin = [False for _ in range(len(image))]
         for t in range(track_seq_len):
             index_mask_t = (point_index <= t + 1)
             image_mask_t = image_mask * index_mask_t
@@ -62,17 +65,14 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             output_t = model(track_features, image, track_mask_t, image_mask_t)
             output_max_t, pred_t = output_t.max(1)
             pred_copy = pred_t.clone()
-            pred_copy[output_max_t < 0.5] = -1
+            pred_copy[output_max_t < threshold] = -1
 
-            begin = False
             for j in range(len(pred_copy)):
-                if pred_copy[j] != -1 and not begin:
-                    begin = True
-                    begin_times.append(j)
-                elif pred_copy[j] == -1 and begin:
+                if pred_copy[j] != -1 and not begin[j]:
+                    begin[j] = True
+                    begin_times[j] = t
+                elif pred_copy[j] == -1 and begin[j]:
                     pred_copy[j] = pred_t[j]
-            if not begin:
-                begin_times.append(len(pred_copy))
             pred.append(pred_copy.cpu().tolist())
 
             cls_loss_t = criterion(output_t, label)
@@ -102,23 +102,27 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
                 continue
             unique_vals, counts = np.unique(pred_j, return_counts=True)
             pred_label = unique_vals[counts.argmax()]
+            train_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
             if pred_label == gt:
                 corrects[gt] += 1
+        train_avg_rate /= len(pred)
 
     train_acc = corrects.sum() / totals.sum()
     totals[totals == 0] = 1
     train_accuracies = corrects / totals
     train_loss = train_loss / len(train_loader)
-    return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time
+    train_avg_rate /= len(train_loader)
+    return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate
 
 
-def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
+def val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
     model.eval()
     val_loss = 0.
     val_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
     val_max_begin_time = 0
+    val_avg_rate = 0.
     with torch.no_grad():
         for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
@@ -133,8 +137,9 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
             label = label.to(device)
 
             cls_loss = 0.
-            begin_times = []
+            begin_times = [track_seq_len for _ in range(len(image))]
             pred = []
+            begin = [False for _ in range(len(image))]
             for t in range(track_seq_len):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
@@ -146,17 +151,14 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 output_t = model(track_features, image, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = -1
+                pred_copy[output_max_t < threshold] = -1
 
-                begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin:
-                        begin = True
-                        begin_times.append(j)
-                    elif pred_copy[j] == -1 and begin:
+                    if pred_copy[j] != -1 and not begin[j]:
+                        begin[j] = True
+                        begin_times[j] = t
+                    elif pred_copy[j] == -1 and begin[j]:
                         pred_copy[j] = pred_t[j]
-                if not begin:
-                    begin_times.append(len(pred_copy))
                 pred.append(pred_copy.cpu().tolist())
 
                 cls_loss_t = criterion(output_t, label)
@@ -183,17 +185,20 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                     continue
                 unique_vals, counts = np.unique(pred_j, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
+                val_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
                 if pred_label == gt:
                     corrects[gt] += 1
+            val_avg_rate /= len(pred)
     val_acc = corrects.sum() / totals.sum()
     totals[totals == 0] = 1
     val_accuracies = corrects / totals
     val_loss = val_loss / len(val_loader)
+    val_avg_rate /= len(val_loader)
 
-    return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time
+    return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate
 
 
-def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn):
+def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn):
     logger.log("Start test on train set...")
     model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
     model.eval()
@@ -213,6 +218,7 @@ def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logge
             label = label.to(device)
 
             pred = []
+            begin = [False for _ in range(len(image))]
             for t in range(track_seq_len):
                 index_mask_t = (point_index <= t + 1).to(device)
                 image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
@@ -222,13 +228,12 @@ def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logge
                 output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = -1
+                pred_copy[output_max_t < threshold] = -1
 
-                begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin:
-                        begin = True
-                    elif pred_copy[j] == -1 and begin:
+                    if pred_copy[j] != -1 and not begin[j]:
+                        begin[j] = True
+                    elif pred_copy[j] == -1 and begin[j]:
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
@@ -290,6 +295,7 @@ def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logge
             label = label.to(device)
 
             pred = []
+            begin = [False for _ in range(len(image))]
             for t in tqdm(range(track_seq_len)):
                 index_mask_t = (point_index <= t + 1).to(device)
                 image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
@@ -299,13 +305,12 @@ def test(model, fc_model, train_loader, val_loader, device, track_seq_len, logge
                 output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
-                pred_copy[output_max_t < 0.5] = -1
+                pred_copy[output_max_t < threshold] = -1
 
-                begin = False
                 for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin:
-                        begin = True
-                    elif pred_copy[j] == -1 and begin:
+                    if pred_copy[j] != -1 and not begin[j]:
+                        begin[j] = True
+                    elif pred_copy[j] == -1 and begin[j]:
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
@@ -393,6 +398,7 @@ def main():
     num_classes      = train_config['num_classes']
     channels         = train_config['channels']
     alpha            = train_config['alpha']
+    threshold        = train_config['threshold']
     height           = train_config['height']
     width            = train_config['width']
     lr_config        = train_config['lr_scheduler']
@@ -453,29 +459,33 @@ def main():
     for epoch in range(start_epoch, epochs):
         logger.log(f'-------------- Epoch {epoch + 1}/{epochs} --------------')
 
-        train_accuracies, train_loss, train_acc, train_time, train_max_begin_time = \
-            train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
+        train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate = \
+            train(model, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/avg_acc", train_acc, epoch)
         writer.add_scalar("train/max_begin_time", train_max_begin_time, epoch)
+        writer.add_scalar("train/avg_rate", train_avg_rate, epoch)
         logger.log(f"Train Loss: {train_loss:.3f}\n"
                    f"Train Accuracy: {train_acc:.3f}\n"
                    f"Train Time: {time.time() - train_time:.3f}s\n"
-                   f"Train Max Begin Time: {train_max_begin_time}\n")
+                   f"Train Max Begin Time: {train_max_begin_time}\n"
+                   f"Train Avg Rate: {train_avg_rate:.3f}\n")
         for i, acc in enumerate(train_accuracies):
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
-        val_accuracies, val_loss, val_acc, val_time, val_max_begin_time = \
-            val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
+        val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate = \
+            val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/avg_acc", val_acc, epoch)
         writer.add_scalar("val/max_begin_time", val_max_begin_time, epoch)
+        writer.add_scalar("val/avg_rate", val_avg_rate, epoch)
         logger.log(f"Val Loss: {val_loss:.3f}\n"
                    f"Val Accuracy: {val_acc:.3f}\n"
                    f"Val Time: {time.time() - val_time:.3f}s\n"
-                   f"Val Max Begin Time: {val_max_begin_time}")
+                   f"Val Max Begin Time: {val_max_begin_time}\n"
+                   f"Val Avg Rate: {val_avg_rate:.3f}")
         for i, acc in enumerate(val_accuracies):
             writer.add_scalar(f"val/acc_{i}", acc, epoch)
 
@@ -490,11 +500,12 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, fc_model, train_loader, val_loader, device, track_seq_len, logger, result_path, log_path, use_flash_attn)
+        test(model, fc_model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn)
 
     logger.close()
     writer.close()
 
 
 if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn')
     main()

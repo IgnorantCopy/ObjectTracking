@@ -58,7 +58,7 @@ def load_image(path):
             imag = rd_matrix[i][j][1]
             value[i][j] = db(real, imag)
     velocity_index = np.where(velocity_axis == 0)[0][0]
-    offset = np.random.choice([0, 0, 1, -1])
+    offset = np.random.choice([0, 0, 0, 0, 0, 0, 1, -1])
     noise = value[:, velocity_index + offset]
     other = value[:, 0]
     return noise, other

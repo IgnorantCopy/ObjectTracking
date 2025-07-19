@@ -12,12 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-POINT_TRACK_HEADER = ["点时间", "批号", "距离", "方位", "俯仰", "多普勒速度", "和幅度", "信噪比", "原始点数量"]
-TRACK_HEADER = ["点时间", "批号", "滤波距离", "滤波方位", "滤波俯仰", "全速度", "X向速度", "Y向速度", "Z向速度", "航向"]
-
-NUMERICAL_POINT_FEATURES = ["距离", "方位", "俯仰", "多普勒速度", "和幅度", "信噪比", "原始点数量"]  # 7
-NUMERICAL_TRACK_FEATURES = ["滤波距离", "滤波方位", "滤波俯仰", "全速度", "X向速度", "Y向速度", "Z向速度", "航向"]  # 8
-TOTAL_FEATURES_PER_TIMESTEP = len(NUMERICAL_POINT_FEATURES) + len(NUMERICAL_TRACK_FEATURES)  # 15
+TOTAL_FEATURES_PER_TIMESTEP = 21
 
 ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
@@ -243,6 +238,91 @@ def read_raw_data(fid):
         return None, None
 
 
+def cfar_detector_2d(rd_matrix_db,
+                      num_guard_cells_range, num_training_cells_range,
+                      num_guard_cells_doppler, num_training_cells_doppler,
+                      cfar_threshold_factor_db):
+    """
+    对RD矩阵执行2D-CFAR检测，找到单个目标并生成掩码.
+
+    :param rd_matrix_db: 输入的RD矩阵 (dB)
+    :param num_guard_cells_range: 距离维保护单元数 (单侧)
+    :param num_training_cells_range: 距离维训练单元数 (单侧)
+    :param num_guard_cells_doppler: 多普勒维保护单元数 (单侧)
+    :param num_training_cells_doppler: 多普勒维训练单元数 (单侧)
+    :param cfar_threshold_factor_db: CFAR门限因子 (dB)
+    :return: 如果找到目标，返回一个应用了十字掩码的RD矩阵；否则返回None.
+    """
+    # 1. 找到最强点
+    if rd_matrix_db.size == 0:
+        return None
+    peak_pos = np.unravel_index(np.argmax(rd_matrix_db), rd_matrix_db.shape)
+    peak_val_db = rd_matrix_db[peak_pos]
+
+    rows, cols = rd_matrix_db.shape
+    peak_row, peak_col = peak_pos
+
+    # 2. 局部背景估计 (CA-CFAR)
+    # 将dB值转为线性功率值
+    rd_matrix_linear = 10**(rd_matrix_db / 10)
+
+    # 定义整个CFAR窗口的半尺寸 (训练+保护)
+    win_half_r = num_training_cells_range + num_guard_cells_range
+    win_half_d = num_training_cells_doppler + num_guard_cells_doppler
+
+    # 遍历整个CFAR窗口，计算训练区噪声
+    noise_sum_linear = 0
+    num_training_cells = 0
+    for r_offset in range(-win_half_r, win_half_r + 1):
+        for d_offset in range(-win_half_d, win_half_d + 1):
+            # 判断当前单元是否在训练区 (在整个窗口内，但在保护区外)
+            is_in_training_area = (abs(r_offset) > num_guard_cells_range or
+                                   abs(d_offset) > num_guard_cells_doppler)
+
+            if is_in_training_area:
+                r_idx = peak_row + r_offset
+                d_idx = peak_col + d_offset
+                # 检查索引是否越界
+                if 0 <= r_idx < rows and 0 <= d_idx < cols:
+                    noise_sum_linear += rd_matrix_linear[r_idx, d_idx]
+                    num_training_cells += 1
+
+    if num_training_cells == 0:
+        return None  # 窗口太小或在角落，无法计算
+
+    avg_noise_linear = noise_sum_linear / num_training_cells
+
+    if avg_noise_linear <= 0:
+        avg_noise_db = -np.inf
+    else:
+        avg_noise_db = 10 * np.log10(avg_noise_linear)
+
+    # 3. 计算并比较门限
+    threshold_db = avg_noise_db + cfar_threshold_factor_db
+
+    # 4. 单一目标判定
+    if peak_val_db > threshold_db:
+        # 找到目标，生成十字掩码
+        mask = np.zeros_like(rd_matrix_db)
+
+        # 垂直部分: 目标列及左右各1列
+        v_start_col = max(0, peak_col - 1)
+        v_end_col = min(cols, peak_col + 2)
+        mask[:, v_start_col:v_end_col] = 1
+
+        # 水平部分: 目标行及上下各4行, 目标列左右各10列
+        h_start_row = max(0, peak_row - 4)
+        h_end_row = min(rows, peak_row + 5)
+        h_start_col = max(0, peak_col - 10)
+        h_end_col = min(cols, peak_col + 11)
+        mask[h_start_row:h_end_row, h_start_col:h_end_col] = 1
+
+        return rd_matrix_db * mask
+    else:
+        # 未找到目标
+        return None
+
+
 def process_batch(batch: BatchFile, model, device):
     """处理单个批次的数据"""
     # 打开原始数据文件
@@ -401,6 +481,21 @@ def process_batch(batch: BatchFile, model, device):
                             rd_matrix[:, velocity_index - i] = 0
                         if pred[0].item() == 1 or pred[1].item() == 1:
                             break
+
+                    # 2D-CFAR 检测和掩码生成
+                    processed_rd = cfar_detector_2d(
+                        rd_matrix_db=rd_matrix,
+                        num_guard_cells_range=2,
+                        num_training_cells_range=4,
+                        num_guard_cells_doppler=2,
+                        num_training_cells_doppler=4,
+                        cfar_threshold_factor_db=6
+                    )
+
+                    if processed_rd is None:
+                        continue  # 未找到目标，跳过此帧
+
+                    rd_matrix = processed_rd
 
                     rd_matrices.append(rd_matrix)
                     ranges.append(range_axis)
@@ -700,20 +795,38 @@ class FusedDataset(Dataset):
                         rd_matrix = 20 * np.log10(rd_matrix)
                         velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
 
-                        for i in range(3):
-                            col1 = rd_matrix[:, velocity_index + i]
-                            col2 = rd_matrix[:, velocity_index - i]
-                            col1 = torch.from_numpy(col1).float()
-                            col2 = torch.from_numpy(col2).float()
-                            col_concat = torch.stack([col1, col2]).to(self.device)
-                            output = self.fc_model(col_concat)
-                            _, pred = torch.max(output, 1)
-                            if pred[0].item() == 0:
-                                rd_matrix[:, velocity_index + i] = 0
-                            if pred[1].item() == 0:
-                                rd_matrix[:, velocity_index - i] = 0
-                            if pred[0].item() == 1 or pred[1].item() == 1:
-                                break
+                        # for i in range(3):
+                        #     col1 = rd_matrix[:, velocity_index + i]
+                        #     col2 = rd_matrix[:, velocity_index - i]
+                        #     col1 = torch.from_numpy(col1).float()
+                        #     col2 = torch.from_numpy(col2).float()
+                        #     col_concat = torch.stack([col1, col2]).to(self.device)
+                        #     output = self.fc_model(col_concat)
+                        #     _, pred = torch.max(output, 1)
+                        #     if pred[0].item() == 0:
+                        #         rd_matrix[:, velocity_index + i] = 0
+                        #     if pred[1].item() == 0:
+                        #         rd_matrix[:, velocity_index - i] = 0
+                        #     if pred[0].item() == 1 or pred[1].item() == 1:
+                        #         break
+                        #
+                        # # 2D-CFAR 检测和掩码生成
+                        # processed_rd = cfar_detector_2d(
+                        #     rd_matrix_db=rd_matrix,
+                        #     num_guard_cells_range=2,
+                        #     num_training_cells_range=4,
+                        #     num_guard_cells_doppler=2,
+                        #     num_training_cells_doppler=4,
+                        #     cfar_threshold_factor_db=6
+                        # )
+                        #
+                        # if processed_rd is None:
+                        #     continue  # 未找到目标，跳过此帧
+                        #
+                        # rd_matrix = processed_rd
+
+                        if label <= 2:
+                            rd_matrix[:, velocity_index - 3:velocity_index + 4] = 0
 
                         # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                         rd_matrix = rd_matrix[:, :, None]
@@ -737,73 +850,67 @@ class FusedDataset(Dataset):
     @staticmethod
     def _load_and_merge_data(point_track_filepath, track_filepath):
         """
-        加载点迹和航迹数据，并根据时间戳和批号进行合并。
-        由于时间戳和批号一一对应，直接水平拼接数值特征。
+        使用 polars 高效加载、合并数据并进行特征工程
+        :param point_track_filepath: 点迹文件路径
+        :param track_filepath: 航迹文件路径
+        :return: 合并和处理后的特征数据 (NumPy Array)
         """
         try:
-            # 使用Polars读取CSV，指定编码和分隔符
-            # has_header=True 因为文件现在有header了
-            df_point = pl.read_csv(point_track_filepath, separator=",", has_header=True, encoding="gbk")
-            df_track = pl.read_csv(track_filepath, separator=",", has_header=True, encoding="gbk")
+            # 1. 加载数据，并明确指定有表头
+            df_point = pl.read_csv(point_track_filepath, has_header=True, separator=",", encoding="gbk")
+            df_track = pl.read_csv(track_filepath, has_header=True, separator=",", encoding="gbk")
 
-            # --- 关键修改 1: 在读取后立即处理 NaN/Null 值 ---
-            # 填充所有数值列的 null 为 0.0。对于非数值列，此操作无效。
-            # 也可以考虑更复杂的填充策略，但对于特征数据，0.0通常是安全的初始选择。
-            # 确保只对实际存在的数值列进行填充
-            for col in NUMERICAL_POINT_FEATURES:
-                if col in df_point.columns:
-                    df_point = df_point.with_columns(pl.col(col).fill_null(0.0).cast(pl.Float64))  # 强制转换为浮点数
-            for col in NUMERICAL_TRACK_FEATURES:
-                if col in df_track.columns:
-                    df_track = df_track.with_columns(pl.col(col).fill_null(0.0).cast(pl.Float64))  # 强制转换为浮点数
+            # 2. 数据类型转换和合并
+            df = df_point.join(df_track, on=["点时间", "批号"], how="left").sort("点时间")
 
-            # 检查时间戳和批号是否完全一致，这是合并的前提
-            if "批号" not in df_point.columns or "批号" not in df_track.columns:
-                print(
-                    f"警告: 文件 {os.path.basename(point_track_filepath)} 或 {os.path.basename(track_filepath)} 缺少'批号'列。")
-                return None
+            # 3. 特征工程 (基于用户提供的新逻辑)
+            # 3.1 计算衍生的时序特征
+            df = df.with_columns(
+                (pl.col("滤波距离") * pl.col("滤波俯仰").radians().sin()).alias("高度"),
+                (pl.col("X向速度").pow(2) + pl.col("Y向速度").pow(2)).sqrt().alias("水平速度"),
+            )
 
-            # 转换为字符串或统一类型再比较，防止类型不一致导致的比较问题
-            # 注意: 如果原始数据中'点时间'或'批号'列存在Null，这里也可能导致问题，
-            # 但通常这些关键ID列不应该有Null。如果确实有，也需要fill_null。
-            if not df_point["点时间"].equals(df_track["点时间"]) or not df_point["批号"].cast(pl.Utf8).equals(
-                    df_track["批号"].cast(pl.Utf8)):
-                print(
-                    f"警告: {os.path.basename(point_track_filepath)} 与 {os.path.basename(track_filepath)} 时间戳或批号不完全一致，跳过此文件对。")
-                return None
+            df = df.with_columns(
+                pl.arctan2(pl.col("Z向速度"), pl.col("水平速度")).alias("爬升/俯冲角度_弧度"),
+                (pl.col("和幅度") * pl.col("滤波距离").pow(4)).log10().alias("RCS"),
+            )
 
-            # 水平拼接数值特征列
-            # 确保所有特征列都存在
-            missing_point_features = [f for f in NUMERICAL_POINT_FEATURES if f not in df_point.columns]
-            missing_track_features = [f for f in NUMERICAL_TRACK_FEATURES if f not in df_track.columns]
+            # 3.2 计算整个序列的统计特征
+            df = df.with_columns(
+                pl.col("全速度").min().alias("最小全速度"),
+                pl.col("全速度").mean().alias("平均全速度"),
+                pl.col("水平速度").mean().alias("平均水平速度"),
+                pl.col("高度").mean().alias("平均高度"),
+                pl.col("高度").max().alias("最大高度"),
+                pl.col("高度").min().alias("最小高度"),
+                (pl.col("高度").max() - pl.col("高度").min()).alias("高度波动范围"),
+                pl.col("高度").std().alias("高度标准差"),
+                pl.col("全速度").max().alias("最大全速度"),
+                pl.col("水平速度").max().alias("最大水平速度"),
+                pl.col("水平速度").min().alias("最小水平速度"),
+                (pl.col("水平速度").max() - pl.col("水平速度").min()).alias("水平速度波动范围"),
+            )
 
-            if missing_point_features or missing_track_features:
-                print(
-                    f"警告: 文件 {os.path.basename(point_track_filepath)} 或 {os.path.basename(track_filepath)} 缺少必要的特征列。")
-                if missing_point_features:
-                    print(f"  点迹缺少: {missing_point_features}")
-                if missing_track_features:
-                    print(f"  航迹缺少: {missing_track_features}")
-                return None
+            # 4. 选择最终的特征
+            final_feature_columns = [
+                # 衍生特征
+                "高度", "水平速度", "爬升/俯冲角度_弧度", "RCS",
+                # 统计特征
+                "最小全速度", "平均全速度", "平均水平速度", "平均高度",
+                "最大高度", "最小高度", "高度波动范围", "高度标准差",
+                "最大全速度", "最大水平速度", "最小水平速度", "水平速度波动范围",
+                # 原始特征
+                "俯仰", "多普勒速度", "和幅度", "信噪比", "原始点数量"
+            ]
+            df_final_features = df.select(final_feature_columns)
 
-            merged_df = pl.concat([df_point[NUMERICAL_POINT_FEATURES], df_track[NUMERICAL_TRACK_FEATURES]],
-                                  how="horizontal")
+            # 5. 一次性填充所有因计算差分等产生的空值
+            df_final_features = df_final_features.fill_null(0.0).fill_nan(0.0)
 
-            # --- 关键修改 2: 在转换为 NumPy 之前，再次检查并处理可能的 NaN/Inf ---
-            # Polars的DataFrame在转换为NumPy时，如果内部有NaN/Inf，会直接传递。
-            # 这一步是双重保险，以防Polars的fill_null没有处理到所有情况(例如，数据类型推断问题)。
-            merged_np = merged_df.to_numpy()
-
-            if np.isnan(merged_np).any() or np.isinf(merged_np).any():
-                print(
-                    f"DEBUG: 在文件 {os.path.basename(point_track_filepath)} 合并后的NumPy数组中检测到 NaN/Inf。正在填充...")
-                merged_np[np.isnan(merged_np)] = 0.0
-                merged_np[np.isinf(merged_np)] = 0.0  # 处理无穷大值
-
-            return merged_np
+            return df_final_features.to_numpy(order='c').astype(np.float32)
 
         except Exception as e:
-            print(f"读取或合并文件失败: {point_track_filepath}, {track_filepath}. 错误: {e}")
+            print(f"处理文件时出错 {point_track_filepath}: {e}")
             return None
 
 
@@ -831,8 +938,8 @@ if __name__ == '__main__':
     from fusion.models.fc import FC
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    batch = 1333
-    label = 2
+    batch = 1
+    label = 1
     batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
                            os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_25.txt"),
                            os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_25.txt"))

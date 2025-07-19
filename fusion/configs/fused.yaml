@@ -21,7 +21,7 @@ rd_model:
 
 track_model:
   name: RoFormer
-  input_dim: 15
+  input_dim: 21
   d_model: 256
   heads: 8
   depth: 4
@@ -44,15 +44,16 @@ data:
 
 
 train:
-  batch_size: 16
+  batch_size: 8
   num_workers: 4
-  num_epochs: 100
+  num_epochs: 1
   lr: 0.01
   height: 32
   width: 544
   num_classes: 6
   channels: 1
   alpha: 0.5
+  threshold: 0.5
   lr_scheduler:
     name: ReduceLROnPlateau
     factor: 0.5
