@@ -17,9 +17,13 @@ A repository for object tracking/detection for low-altitude radar.
 
 1. 实现模型：ViT in ViT、ViViT、SwinTransformer3D
 2. DataLoader：将一条航迹的 RD 图视为一个整体，包括计算准确率时
-    + 与赛方要求不一致，待完善
+    + 注意这与赛方要求不一致
 
 > 注意：该版本开始 RD 图直接从原始回波中提取，不再提前准备并保存
+
+> flash attention Windows 版本下载地址：https://github.com/kingbri1/flash-attention/releases
+> 
+> Linux 版本下载地址：https://github.com/Dao-AILab/flash-attention/releases
 
 ## 3. RD 图与点航数据融合方法
 
@@ -40,6 +44,7 @@ A repository for object tracking/detection for low-altitude radar.
     │   │   │   │   │   └── trajectory.png
     │   │   │   │   ├── Frame_2
     │   │   │   │   └── ...
+    │   │   │   └── ...
     │   │   ├── Label_2
     │   │   └── ...
     │   └── wrong
@@ -56,5 +61,17 @@ A repository for object tracking/detection for low-altitude radar.
 > 注：rd_map.png 上标注了模型预测的标签，文件夹名称是真实标签
 
 3. 待完善： 
-   + 流式数据加载以及新的准确率计算方式
-   + RD 图可视化出来与原先有差别，待修改
+   + RD 图分支考虑将全局信息融合进来，可从位置编码着手
+
+## 4. 训练杂波/噪声二分类预训练模型
+> 对应 noise_cls 目录
+
+1. 数据准备：
+   + 通过运行 data/RDMap_new.m 文件得到原始 RD 图数据，得到 MTD_Results 目录
+   + 运行 noise_cls/utils/data.py，读取 MTD_Results 目录，生成本任务的数据集 noise_cls
+2. 模型架构：简单的三层全连接层
+
+## 5. 提示词工程
+> 对应 prompt_engineering 目录
+
+> 仅实现了代码，效果未验证（缺钱😜）
