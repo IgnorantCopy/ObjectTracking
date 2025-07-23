@@ -35,6 +35,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
     train_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
+    conf_mat = np.zeros((num_classes, num_classes))
     train_max_begin_time = 0
     train_avg_rate = 0.
     for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
@@ -105,14 +106,14 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
             train_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
             if pred_label == gt:
                 corrects[gt] += 1
-        train_avg_rate /= len(pred)
+            conf_mat[pred_label][gt] += 1
 
     train_acc = corrects.sum() / totals.sum()
     totals[totals == 0] = 1
     train_accuracies = corrects / totals
     train_loss = train_loss / len(train_loader)
-    train_avg_rate /= len(train_loader)
-    return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate
+    train_avg_rate /= len(train_loader) * track_seq_len
+    return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, conf_mat
 
 
 def val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
@@ -121,6 +122,7 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
     val_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
+    conf_mat = np.zeros((num_classes, num_classes))
     val_max_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
@@ -188,14 +190,14 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
                 val_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
                 if pred_label == gt:
                     corrects[gt] += 1
-            val_avg_rate /= len(pred)
+                conf_mat[pred_label][gt] += 1
     val_acc = corrects.sum() / totals.sum()
     totals[totals == 0] = 1
     val_accuracies = corrects / totals
     val_loss = val_loss / len(val_loader)
-    val_avg_rate /= len(val_loader)
+    val_avg_rate /= len(val_loader) * track_seq_len
 
-    return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate
+    return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, conf_mat
 
 
 def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn):
@@ -459,7 +461,7 @@ def main():
     for epoch in range(start_epoch, epochs):
         logger.log(f'-------------- Epoch {epoch + 1}/{epochs} --------------')
 
-        train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate = \
+        train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, train_conf_mat = \
             train(model, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("train/loss", train_loss, epoch)
@@ -471,10 +473,12 @@ def main():
                    f"Train Time: {time.time() - train_time:.3f}s\n"
                    f"Train Max Begin Time: {train_max_begin_time}\n"
                    f"Train Avg Rate: {train_avg_rate:.3f}\n")
+        if epoch % 10 == 0:
+            logger.log(f"Confusion Matrix:\n{train_conf_mat}")
         for i, acc in enumerate(train_accuracies):
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
-        val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate = \
+        val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, val_conf_mat = \
             val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("val/loss", val_loss, epoch)
@@ -486,6 +490,8 @@ def main():
                    f"Val Time: {time.time() - val_time:.3f}s\n"
                    f"Val Max Begin Time: {val_max_begin_time}\n"
                    f"Val Avg Rate: {val_avg_rate:.3f}")
+        if epoch % 10 == 0:
+            logger.log(f"Confusion Matrix:\n{val_conf_mat}")
         for i, acc in enumerate(val_accuracies):
             writer.add_scalar(f"val/acc_{i}", acc, epoch)
 

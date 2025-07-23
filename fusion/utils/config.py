@@ -50,11 +50,11 @@ def get_model(rd_model_config, track_model_config, channels, num_classes):
         else:
             raise NotImplementedError(f"Norm {norm} not implemented")
         rd_model = SwinTransformer3D(patch_size=(patch_depth, patch_height, patch_width),
-                                 in_channels=channels, embed_dim=embed_dim, depths=depths, heads=heads,
-                                 window_size=(window_depth, window_height, window_width),
-                                 qkv_bias=qkv_bias, dropout=dropout, attn_dropout=attn_dropout,
-                                 dropout_path=dropout_path, ff_ratio=ff_ratio, norm=norm,
-                                 patch_norm=patch_norm, frozen_stages=frozen_stages)
+                                     in_channels=channels, embed_dim=embed_dim, depths=depths, heads=heads,
+                                     window_size=(window_depth, window_height, window_width),
+                                     qkv_bias=qkv_bias, dropout=dropout, attn_dropout=attn_dropout,
+                                     dropout_path=dropout_path, ff_ratio=ff_ratio, norm=norm,
+                                     patch_norm=patch_norm, frozen_stages=frozen_stages)
     else:
         raise NotImplementedError(f"RD Model {rd_model_config['name']} not implemented")
 

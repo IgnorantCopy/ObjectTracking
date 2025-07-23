@@ -238,89 +238,192 @@ def read_raw_data(fid):
         return None, None
 
 
-def cfar_detector_2d(rd_matrix_db,
-                      num_guard_cells_range, num_training_cells_range,
-                      num_guard_cells_doppler, num_training_cells_doppler,
-                      cfar_threshold_factor_db):
+def cfar_detector_2d(rd_matrix, velocity_axis,
+                     detection_area_rows, detection_area_cols,
+                     num_guard_cells_range, num_training_cells_range,
+                     num_guard_cells_doppler, num_training_cells_doppler,
+                     cfar_threshold_factor):
     """
-    对RD矩阵执行2D-CFAR检测，找到单个目标并生成掩码.
+    对RD矩阵执行2D-CFAR检测
 
-    :param rd_matrix_db: 输入的RD矩阵 (dB)
+    :param rd_matrix: 输入的 RD 矩阵 (linear)
+    :param detection_area_rows: 距离维检测区域行索引范围
+    :param detection_area_cols: 多普勒维检测区域列索引范围
     :param num_guard_cells_range: 距离维保护单元数 (单侧)
-    :param num_training_cells_range: 距离维训练单元数 (单侧)
+    :param num_training_cells_range: 距离维训练单元数 (单侧) - 这里会被忽略
     :param num_guard_cells_doppler: 多普勒维保护单元数 (单侧)
     :param num_training_cells_doppler: 多普勒维训练单元数 (单侧)
-    :param cfar_threshold_factor_db: CFAR门限因子 (dB)
-    :return: 如果找到目标，返回一个应用了十字掩码的RD矩阵；否则返回None.
+    :param cfar_threshold_factor: CFAR门限因子
+    :return: 如果找到目标，返回一个应用了十字掩码的RD矩阵；否则返回None
     """
-    # 1. 找到最强点
-    if rd_matrix_db.size == 0:
+
+    if rd_matrix.size == 0:
         return None
-    peak_pos = np.unravel_index(np.argmax(rd_matrix_db), rd_matrix_db.shape)
-    peak_val_db = rd_matrix_db[peak_pos]
 
-    rows, cols = rd_matrix_db.shape
-    peak_row, peak_col = peak_pos
+    rows, cols = rd_matrix.shape
 
-    # 2. 局部背景估计 (CA-CFAR)
-    # 将dB值转为线性功率值
-    rd_matrix_linear = 10**(rd_matrix_db / 10)
+    target_detected, target_row, target_col = func_ca_cfar_detect(
+        rd_matrix,
+        detection_area_rows,
+        detection_area_cols,
+        num_guard_cells_range,  # Gr
+        num_guard_cells_doppler,  # Gd
+        num_training_cells_doppler,  # Td
+        cfar_threshold_factor  # 转换为线性域阈值因子
+    )
 
-    # 定义整个CFAR窗口的半尺寸 (训练+保护)
-    win_half_r = num_training_cells_range + num_guard_cells_range
-    win_half_d = num_training_cells_doppler + num_guard_cells_doppler
+    if target_detected and abs(velocity_axis[target_col]) > 56:
+        target_detected = False
 
-    # 遍历整个CFAR窗口，计算训练区噪声
-    noise_sum_linear = 0
-    num_training_cells = 0
-    for r_offset in range(-win_half_r, win_half_r + 1):
-        for d_offset in range(-win_half_d, win_half_d + 1):
-            # 判断当前单元是否在训练区 (在整个窗口内，但在保护区外)
-            is_in_training_area = (abs(r_offset) > num_guard_cells_range or
-                                   abs(d_offset) > num_guard_cells_doppler)
-
-            if is_in_training_area:
-                r_idx = peak_row + r_offset
-                d_idx = peak_col + d_offset
-                # 检查索引是否越界
-                if 0 <= r_idx < rows and 0 <= d_idx < cols:
-                    noise_sum_linear += rd_matrix_linear[r_idx, d_idx]
-                    num_training_cells += 1
-
-    if num_training_cells == 0:
-        return None  # 窗口太小或在角落，无法计算
-
-    avg_noise_linear = noise_sum_linear / num_training_cells
-
-    if avg_noise_linear <= 0:
-        avg_noise_db = -np.inf
-    else:
-        avg_noise_db = 10 * np.log10(avg_noise_linear)
-
-    # 3. 计算并比较门限
-    threshold_db = avg_noise_db + cfar_threshold_factor_db
-
-    # 4. 单一目标判定
-    if peak_val_db > threshold_db:
-        # 找到目标，生成十字掩码
-        mask = np.zeros_like(rd_matrix_db)
+    if target_detected:
+        # 生成十字掩码（保持原有逻辑）
+        mask = np.zeros_like(rd_matrix)
 
         # 垂直部分: 目标列及左右各1列
-        v_start_col = max(0, peak_col - 1)
-        v_end_col = min(cols, peak_col + 2)
+        v_start_col = max(0, target_col - 1)
+        v_end_col = min(cols, target_col + 2)
         mask[:, v_start_col:v_end_col] = 1
 
         # 水平部分: 目标行及上下各4行, 目标列左右各10列
-        h_start_row = max(0, peak_row - 4)
-        h_end_row = min(rows, peak_row + 5)
-        h_start_col = max(0, peak_col - 10)
-        h_end_col = min(cols, peak_col + 11)
+        h_start_row = max(0, target_row - 4)
+        h_end_row = min(rows, target_row + 5)
+        h_start_col = max(0, target_col - 10)
+        h_end_col = min(cols, target_col + 11)
         mask[h_start_row:h_end_row, h_start_col:h_end_col] = 1
 
-        return rd_matrix_db * mask
+        return rd_matrix * mask
     else:
-        # 未找到目标
         return None
+
+
+def func_ca_cfar_detect(data_amplitude, detection_rows, detection_cols, Gr, Gd, Td, threshold_factor):
+    """
+    实现改进的CA-CFAR检测功能 - 多普勒向使用较小平均值的一侧
+
+    :param data_amplitude: RD图的幅度数据（线性域）
+    :param detection_rows: 需要检测的距离单元索引范围
+    :param detection_cols: 需要检测的多普勒单元索引范围
+    :param Gr: 距离向保护单元数
+    :param Gd: 多普勒向保护单元数
+    :param Td: 多普勒向参考单元数 (左右各Td)
+    :param threshold_factor: 阈值因子（线性域）
+    :return: (target_detected, target_row, target_col)
+    """
+
+    num_rows, num_cols = data_amplitude.shape
+    target_detected = False
+    target_row = np.nan
+    target_col = np.nan
+
+    # 确保索引在有效范围内
+    if len(detection_rows) == 0 or len(detection_cols) == 0:
+        return target_detected, target_row, target_col
+    if detection_rows[0] < 0 or detection_rows[-1] >= num_rows or detection_cols[0] < 0 or detection_cols[-1] >= num_cols:
+        return target_detected, target_row, target_col
+
+    # 提取检测区域的数据
+    detection_area_data = data_amplitude[np.ix_(detection_rows, detection_cols)]
+
+    # 获取检测区域内所有点的索引，并按幅度降序排列
+    flat_indices = np.argsort(detection_area_data.ravel())[::-1]  # 降序
+    rows_in_detection_area, cols_in_detection_area = np.unravel_index(
+        flat_indices, detection_area_data.shape
+    )
+
+    # 遍历检测区域内每一个点，从幅度最高的点开始
+    for k in range(len(flat_indices)):
+        current_row_in_detection_area = rows_in_detection_area[k]
+        current_col_in_detection_area = cols_in_detection_area[k]
+
+        # 将检测区域内的坐标转换为全局RD图的坐标
+        i = detection_rows[current_row_in_detection_area]
+        j = detection_cols[current_col_in_detection_area]
+
+        # 确保当前点在有效的检测区域内
+        if i < 0 or i >= num_rows or j < 0 or j >= num_cols:
+            continue
+
+        # 计算距离向参考单元的索引（保持原有逻辑）
+        range_ref_indices_before = np.arange(0, max(0, i - Gr))
+        range_ref_indices_after = np.arange(min(num_rows, i + Gr + 1), num_rows)
+        range_ref_indices = np.concatenate([range_ref_indices_before, range_ref_indices_after])
+
+        # === 新的多普勒向参考单元选择逻辑 ===
+        # 分别计算左侧和右侧的多普勒参考单元
+        doppler_ref_indices_left = np.arange(
+            max(0, j - Gd - Td),
+            max(0, j - Gd)
+        )
+        doppler_ref_indices_right = np.arange(
+            min(num_cols, j + Gd + 1),
+            min(num_cols, j + Gd + Td + 1)
+        )
+
+        # 计算左右两侧的平均噪声功率
+        left_noise_sum = 0
+        left_noise_count = 0
+        right_noise_sum = 0
+        right_noise_count = 0
+
+        # 左侧平均值
+        if len(doppler_ref_indices_left) > 0:
+            left_noise_sum = np.sum(data_amplitude[i, doppler_ref_indices_left])
+            left_noise_count = len(doppler_ref_indices_left)
+
+        # 右侧平均值
+        if len(doppler_ref_indices_right) > 0:
+            right_noise_sum = np.sum(data_amplitude[i, doppler_ref_indices_right])
+            right_noise_count = len(doppler_ref_indices_right)
+
+        # 选择平均值较小的一侧
+        if left_noise_count > 0 and right_noise_count > 0:
+            # 两侧都有数据，选择平均值较小的一侧
+            left_avg = left_noise_sum / left_noise_count
+            right_avg = right_noise_sum / right_noise_count
+
+            if left_avg <= right_avg:
+                doppler_noise_sum = left_noise_sum
+                doppler_noise_count = left_noise_count
+            else:
+                doppler_noise_sum = right_noise_sum
+                doppler_noise_count = right_noise_count
+        elif left_noise_count > 0:
+            # 只有左侧有数据
+            doppler_noise_sum = left_noise_sum
+            doppler_noise_count = left_noise_count
+        elif right_noise_count > 0:
+            # 只有右侧有数据
+            doppler_noise_sum = right_noise_sum
+            doppler_noise_count = right_noise_count
+        else:
+            # 两侧都没有数据，跳过此点
+            continue
+
+        # 计算距离向参考单元的噪声贡献
+        range_noise_sum = 0
+        range_noise_count = 0
+        if len(range_ref_indices) > 0:
+            range_noise_sum = np.sum(data_amplitude[range_ref_indices, j])
+            range_noise_count = len(range_ref_indices)
+
+        # 计算总的平均噪声功率
+        total_noise_sum = range_noise_sum + doppler_noise_sum
+        total_noise_count = range_noise_count + doppler_noise_count
+
+        if total_noise_count == 0:
+            continue  # 避免除以零
+
+        noise_average = total_noise_sum / total_noise_count
+        threshold = threshold_factor * noise_average
+
+        # 比较当前点与阈值
+        if data_amplitude[i, j] > threshold:
+            target_detected = True
+            target_row = i
+            target_col = j
+            return target_detected, target_row, target_col
+
+    return target_detected, target_row, target_col
 
 
 def process_batch(batch: BatchFile, model, device):
@@ -330,183 +433,160 @@ def process_batch(batch: BatchFile, model, device):
     rd_matrices = []
     ranges = []
     velocities = []
-    try:
-        with open(batch.raw_file, 'rb') as fid:
-            while True:
-                params, data = read_raw_data(fid)
-                if params is None or data is None:
-                    break
 
-                frame_count += 1
+    with open(batch.raw_file, 'rb') as fid:
+        while True:
+            params, data = read_raw_data(fid)
+            if params is None or data is None:
+                break
 
-                # 跳过没有航迹信息的帧
-                if len(params.track_no_info) == 0:
-                    continue
+            frame_count += 1
 
-                # 添加数据验证
-                if len(params.track_no_info) < 4:
-                    continue
+            # 跳过没有航迹信息的帧
+            if len(params.track_no_info) == 0:
+                continue
 
-                # 验证参数有效性
-                if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
-                    continue
+            # 添加数据验证
+            if len(params.track_no_info) < 4:
+                continue
 
-                try:
-                    # MTD处理
-                    # ===== 关键修改 1：修正加窗操作 =====
-                    distance_bins = data.shape[0]  # 距离单元数 (31)
-                    prt_bins = data.shape[1]  # PRT数
-                    # 生成泰勒窗 - 在距离维度加窗（窗长 = 距离单元数）
-                    mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
-                    # 将窗函数转换为列向量 (31×1)
-                    mtd_win_col = mtd_win.reshape(-1, 1)
-                    # 在PRT维度（列方向）重复窗函数 (31×N)
-                    coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
-                    # 加窗处理
-                    data_windowed = data * coef_mtd_2d
-                    # FFT处理 - 在慢时间维度（轴1）进行FFT
-                    mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
+            # 验证参数有效性
+            if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
+                continue
 
-                    # 计算多普勒速度轴 - 修复溢出问题
-                    try:
-                        delta_v = C / (2 * params.prt_num * params.prt * params.freq)
+            # MTD处理
+            # ===== 关键修改 1：修正加窗操作 =====
+            distance_bins = data.shape[0]  # 距离单元数 (31)
+            prt_bins = data.shape[1]  # PRT数
+            # 生成泰勒窗 - 在距离维度加窗（窗长 = 距离单元数）
+            mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
+            # 将窗函数转换为列向量 (31×1)
+            mtd_win_col = mtd_win.reshape(-1, 1)
+            # 在PRT维度（列方向）重复窗函数 (31×N)
+            coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
+            # 加窗处理
+            data_windowed = data * coef_mtd_2d
+            # FFT处理 - 在慢时间维度（轴1）进行FFT
+            mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
 
-                        # 检查delta_v是否有效
-                        if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
-                            print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
-                            continue
+            # 计算多普勒速度轴 - 修复溢出问题
 
-                        # 修复溢出问题 - 使用更安全的方式
-                        half_prt = prt_bins // 2
+            delta_v = C / (2 * params.prt_num * params.prt * params.freq)
 
-                        # 检查half_prt是否合理
-                        if half_prt <= 0 or half_prt > 10000:
-                            print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
-                            continue
+            # 检查delta_v是否有效
+            if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
+                print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
+                continue
 
-                        # 使用int32避免溢出
-                        v_axis = np.linspace(-prt_bins / 2 * delta_v,
-                                             prt_bins / 2 * delta_v,
-                                             prt_bins,
-                                             endpoint=False)
+            # 修复溢出问题 - 使用更安全的方式
+            half_prt = prt_bins // 2
 
-                        # 检查v_axis是否有效
-                        if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
-                            print(
-                                f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
-                            continue
+            # 检查half_prt是否合理
+            if half_prt <= 0 or half_prt > 10000:
+                print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
+                continue
 
-                    except Exception as e:
-                        print(f"警告：帧 {frame_count} 计算速度轴时出错: {str(e)}")
-                        continue
+            # 使用int32避免溢出
+            v_axis = np.linspace(-prt_bins / 2 * delta_v,prt_bins / 2 * delta_v, prt_bins, endpoint=False)
 
-                    # 目标检测
-                    amp_max_vr_unit = int(params.track_no_info[3])
+            # 检查v_axis是否有效
+            if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
+                print(
+                    f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
+                continue
 
-                    # 修正多普勒索引
-                    if amp_max_vr_unit > half_prt:
-                        amp_max_vr_unit = amp_max_vr_unit - half_prt
-                    else:
-                        amp_max_vr_unit = amp_max_vr_unit + half_prt
+            # 目标检测
+            amp_max_vr_unit = int(params.track_no_info[3])
 
-                    # 转换为Python的0-based索引
-                    amp_max_vr_unit = amp_max_vr_unit - 1
+            # 修正多普勒索引
+            if amp_max_vr_unit > half_prt:
+                amp_max_vr_unit = amp_max_vr_unit - half_prt
+            else:
+                amp_max_vr_unit = amp_max_vr_unit + half_prt
 
-                    # 确保索引在有效范围内
-                    amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
+            # 转换为Python的0-based索引
+            amp_max_vr_unit = amp_max_vr_unit - 1
 
-                    # 目标中心位于第16个距离单元
-                    center_local_bin = 15
-                    local_radius = 5
+            # 确保索引在有效范围内
+            amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
 
-                    # 计算局部检测窗口
-                    range_start_local = max(0, center_local_bin - local_radius)
-                    range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
-                    doppler_start = max(0, amp_max_vr_unit - local_radius)
-                    doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
+            # 目标中心位于第16个距离单元
+            center_local_bin = 15
+            local_radius = 5
 
-                    target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
+            # 计算局部检测窗口
+            range_start_local = max(0, center_local_bin - local_radius)
+            range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
+            doppler_start = max(0, amp_max_vr_unit - local_radius)
+            doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
 
-                    # 检测峰值
-                    abs_target = np.abs(target_sig)
-                    if abs_target.size == 0:
-                        continue
+            target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
 
-                    max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
-                    amp_max_index_row, amp_max_index_col = max_idx
+            # 检测峰值
+            abs_target = np.abs(target_sig)
+            if abs_target.size == 0:
+                continue
 
-                    # 获取目标全局距离单元索引
-                    global_range_bin = int(params.track_no_info[2])
+            max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
+            amp_max_index_row, amp_max_index_col = max_idx
 
-                    # 计算实际距离范围
-                    range_start_bin = global_range_bin - 15
-                    range_end_bin = global_range_bin + 15
+            # 获取目标全局距离单元索引
+            global_range_bin = int(params.track_no_info[2])
 
-                    # 计算真实距离轴
-                    range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
+            # 计算实际距离范围
+            range_start_bin = global_range_bin - 15
+            range_end_bin = global_range_bin + 15
 
-                    # 转换到全局距离位置
-                    detected_range_bin = range_start_local + amp_max_index_row
-                    if detected_range_bin >= len(range_plot):
-                        continue
+            # 计算真实距离轴
+            range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
 
-                    # 安全地计算多普勒速度
-                    doppler_idx = doppler_start + amp_max_index_col
-                    if doppler_idx >= len(v_axis):
-                        continue
+            # 转换到全局距离位置
+            detected_range_bin = range_start_local + amp_max_index_row
+            if detected_range_bin >= len(range_plot):
+                continue
 
-                    # 保存MTD处理结果
-                    rd_matrix = mtd_result
-                    range_axis = range_plot
-                    velocity_axis = v_axis
-                    velocity_mask = np.abs(velocity_axis) < 56
-                    velocity_axis = velocity_axis[velocity_mask]
-                    rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
-                    rd_matrix = np.abs(rd_matrix)
-                    rd_matrix = np.clip(rd_matrix, 1e-10, 1e10)
-                    rd_matrix = 20 * np.log10(rd_matrix)
-                    velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
+            # 安全地计算多普勒速度
+            doppler_idx = doppler_start + amp_max_index_col
+            if doppler_idx >= len(v_axis):
+                continue
 
-                    for i in range(3):
-                        col1 = rd_matrix[:, velocity_index + i]
-                        col2 = rd_matrix[:, velocity_index - i]
-                        col1 = torch.from_numpy(col1).float()
-                        col2 = torch.from_numpy(col2).float()
-                        col_concat = torch.stack([col1, col2]).to(device)
-                        output = model(col_concat)
-                        _, pred = torch.max(output, 1)
-                        if pred[0].item() == 0:
-                            rd_matrix[:, velocity_index + i] = 0
-                        if pred[1].item() == 0:
-                            rd_matrix[:, velocity_index - i] = 0
-                        if pred[0].item() == 1 or pred[1].item() == 1:
-                            break
+            # 保存MTD处理结果
+            rd_matrix = mtd_result
+            range_axis = range_plot
+            velocity_axis = v_axis
+            rd_matrix = np.abs(rd_matrix)
+            velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
+            rd_matrix[:, velocity_index] = 0
 
-                    # 2D-CFAR 检测和掩码生成
-                    processed_rd = cfar_detector_2d(
-                        rd_matrix_db=rd_matrix,
-                        num_guard_cells_range=2,
-                        num_training_cells_range=4,
-                        num_guard_cells_doppler=2,
-                        num_training_cells_doppler=4,
-                        cfar_threshold_factor_db=6
-                    )
+            # 2D-CFAR 检测和掩码生成
+            processed_rd = cfar_detector_2d(
+                rd_matrix=rd_matrix,
+                velocity_axis=velocity_axis.reshape(-1),
+                detection_area_rows=np.arange(range_start_local, range_end_local),
+                detection_area_cols=np.arange(doppler_start, doppler_end),
+                num_guard_cells_range=2,
+                num_training_cells_range=4,
+                num_guard_cells_doppler=2,
+                num_training_cells_doppler=4,
+                cfar_threshold_factor=6.5
+            )
 
-                    if processed_rd is None:
-                        continue  # 未找到目标，跳过此帧
+            if processed_rd is None:
+                print(f"帧 {frame_count} 未找到目标")
+                continue  # 未找到目标，跳过此帧
 
-                    rd_matrix = processed_rd
+            rd_matrix = processed_rd
+            velocity_mask = np.abs(velocity_axis) < 56
+            velocity_axis = velocity_axis[velocity_mask]
+            rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
+            rd_matrix = np.clip(rd_matrix, 1, 1e10)
+            rd_matrix = 20 * np.log10(rd_matrix)
 
-                    rd_matrices.append(rd_matrix)
-                    ranges.append(range_axis)
-                    velocities.append(velocity_axis)
+            rd_matrices.append(rd_matrix)
+            ranges.append(range_axis)
+            velocities.append(velocity_axis)
 
-                except Exception as e:
-                    # 静默跳过有问题的帧，避免过多错误输出
-                    continue
 
-    except Exception as e:
-        raise ValueError(f"读取原始数据文件失败：{str(e)}")
 
     return rd_matrices, ranges, velocities
 
@@ -616,6 +696,9 @@ class FusedDataset(Dataset):
 
         # load rd map
         images, point_index = self._process_batch(batch_file, num_points)
+        if len(images) == 0:
+            return batch_file, None, None, None, None, None, cls
+
         image_mask = np.ones((self.image_seq_len,), dtype=np.int32)
         if images.shape[0] < self.image_seq_len:
             image_mask[images.shape[0]:] = 0
@@ -636,7 +719,8 @@ class FusedDataset(Dataset):
 
         # load point and track data
         merged_data = self._load_and_merge_data(point_file, track_file)
-        assert merged_data is not None and merged_data.shape[0] > 0, f"读取或合并文件失败: {point_file}, {track_file}"
+        if len(merged_data) == 0:
+            return batch_file, None, None, None, None, None, cls
         if merged_data.dtype != np.float32:
             merged_data = merged_data.astype(np.float32)
         track_mask = np.ones((self.track_seq_len,), dtype=np.int32)
@@ -661,190 +745,174 @@ class FusedDataset(Dataset):
         rd_matrices = []
         point_index = []
         label = batch.label
-        try:
-            with open(batch.raw_file, 'rb') as fid:
-                while True:
-                    params, data = read_raw_data(fid)
-                    if params is None or data is None:
-                        break
 
-                    frame_count += 1
+        with open(batch.raw_file, 'rb') as fid:
+            while True:
+                params, data = read_raw_data(fid)
+                if params is None or data is None:
+                    break
 
-                    # 跳过没有航迹信息的帧
-                    if len(params.track_no_info) == 0:
+                frame_count += 1
+
+                # 跳过没有航迹信息的帧
+                if len(params.track_no_info) == 0:
+                    continue
+
+                # 添加数据验证
+                if len(params.track_no_info) < 4:
+                    continue
+
+                # 验证参数有效性
+                if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
+                    continue
+
+                # MTD处理
+                distance_bins = data.shape[0]  # 距离单元数 (31)
+                prt_bins = data.shape[1]  # PRT数
+                # 生成泰勒窗 - 使用PRT数作为窗长，匹配MATLAB
+                mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
+                mtd_win_col = mtd_win.reshape(-1, 1)
+                # 在距离维度重复窗函数
+                coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
+                # 加窗处理
+                data_windowed = data * coef_mtd_2d
+                # FFT处理 - 在PRT维度（轴1）进行FFT
+                mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
+
+                # 计算多普勒速度轴 - 修复溢出问题
+                try:
+                    delta_v = C / (2 * params.prt_num * params.prt * params.freq)
+
+                    # 检查delta_v是否有效
+                    if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
+                        print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
                         continue
 
-                    # 添加数据验证
-                    if len(params.track_no_info) < 4:
+                    # 修复溢出问题 - 使用更安全的方式
+                    half_prt = params.prt_num // 2
+
+                    # 检查half_prt是否合理
+                    if half_prt <= 0 or half_prt > 10000:
+                        print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
                         continue
 
-                    # 验证参数有效性
-                    if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
+                    # 使用int32避免溢出
+                    v_start = -int(half_prt)
+                    v_end = int(half_prt)
+                    v_indices = np.arange(v_start, v_end, dtype=np.int32)
+                    v_axis = v_indices.astype(np.float64) * delta_v
+
+                    # 检查v_axis是否有效
+                    if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
+                        print(
+                            f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
                         continue
 
-                    try:
-                        # MTD处理
-                        distance_bins = data.shape[0]  # 距离单元数 (31)
-                        prt_bins = data.shape[1]  # PRT数
-                        # 生成泰勒窗 - 使用PRT数作为窗长，匹配MATLAB
-                        mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
-                        mtd_win_col = mtd_win.reshape(-1, 1)
-                        # 在距离维度重复窗函数
-                        coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
-                        # 加窗处理
-                        data_windowed = data * coef_mtd_2d
-                        # FFT处理 - 在PRT维度（轴1）进行FFT
-                        mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
+                except Exception as e:
+                    print(f"警告：帧 {frame_count} 计算速度轴时出错: {str(e)}")
+                    continue
 
-                        # 计算多普勒速度轴 - 修复溢出问题
-                        try:
-                            delta_v = C / (2 * params.prt_num * params.prt * params.freq)
+                # 目标检测
+                amp_max_vr_unit = int(params.track_no_info[3])
 
-                            # 检查delta_v是否有效
-                            if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
-                                print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
-                                continue
+                # 修正多普勒索引
+                if amp_max_vr_unit > half_prt:
+                    amp_max_vr_unit = amp_max_vr_unit - half_prt
+                else:
+                    amp_max_vr_unit = amp_max_vr_unit + half_prt
 
-                            # 修复溢出问题 - 使用更安全的方式
-                            half_prt = params.prt_num // 2
+                # 转换为Python的0-based索引
+                amp_max_vr_unit = amp_max_vr_unit - 1
 
-                            # 检查half_prt是否合理
-                            if half_prt <= 0 or half_prt > 10000:
-                                print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
-                                continue
+                # 确保索引在有效范围内
+                amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
 
-                            # 使用int32避免溢出
-                            v_start = -int(half_prt)
-                            v_end = int(half_prt)
-                            v_indices = np.arange(v_start, v_end, dtype=np.int32)
-                            v_axis = v_indices.astype(np.float64) * delta_v
+                # 目标中心位于第16个距离单元
+                center_local_bin = 15
+                local_radius = 5
 
-                            # 检查v_axis是否有效
-                            if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
-                                print(
-                                    f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
-                                continue
+                # 计算局部检测窗口
+                range_start_local = max(0, center_local_bin - local_radius)
+                range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
+                doppler_start = max(0, amp_max_vr_unit - local_radius)
+                doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
 
-                        except Exception as e:
-                            print(f"警告：帧 {frame_count} 计算速度轴时出错: {str(e)}")
-                            continue
+                target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
 
-                        # 目标检测
-                        amp_max_vr_unit = int(params.track_no_info[3])
+                # 检测峰值
+                abs_target = np.abs(target_sig)
+                if abs_target.size == 0:
+                    continue
 
-                        # 修正多普勒索引
-                        if amp_max_vr_unit > half_prt:
-                            amp_max_vr_unit = amp_max_vr_unit - half_prt
-                        else:
-                            amp_max_vr_unit = amp_max_vr_unit + half_prt
+                max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
+                amp_max_index_row, amp_max_index_col = max_idx
 
-                        # 转换为Python的0-based索引
-                        amp_max_vr_unit = amp_max_vr_unit - 1
+                # 获取目标全局距离单元索引
+                global_range_bin = int(params.track_no_info[2])
 
-                        # 确保索引在有效范围内
-                        amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
+                # 计算实际距离范围
+                range_start_bin = global_range_bin - 15
+                range_end_bin = global_range_bin + 15
 
-                        # 目标中心位于第16个距离单元
-                        center_local_bin = 15
-                        local_radius = 5
+                # 计算真实距离轴
+                range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
 
-                        # 计算局部检测窗口
-                        range_start_local = max(0, center_local_bin - local_radius)
-                        range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
-                        doppler_start = max(0, amp_max_vr_unit - local_radius)
-                        doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
+                # 转换到全局距离位置
+                detected_range_bin = range_start_local + amp_max_index_row
+                if detected_range_bin >= len(range_plot):
+                    continue
 
-                        target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
+                # 安全地计算多普勒速度
+                doppler_idx = doppler_start + amp_max_index_col
+                if doppler_idx >= len(v_axis):
+                    continue
 
-                        # 检测峰值
-                        abs_target = np.abs(target_sig)
-                        if abs_target.size == 0:
-                            continue
+                # 保存MTD处理结果
+                rd_matrix = mtd_result
+                velocity_axis = v_axis.reshape(-1)
+                rd_matrix = np.abs(rd_matrix)
 
-                        max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
-                        amp_max_index_row, amp_max_index_col = max_idx
+                velocity_index = np.where(velocity_axis == 0)[0][0]
+                index = min(params.track_no_info[1], num_points)
+                point_df = pl.read_csv(batch.point_file, has_header=True, separator=",", encoding="gbk")
+                doppler_velocity = point_df["多普勒速度"][int(index) - 1]
+                for i in range(3):
+                    if abs(doppler_velocity) > velocity_axis[velocity_index + i]:
+                        rd_matrix[:, velocity_index + i] = 0
+                        rd_matrix[:, velocity_index - i] = 0
 
-                        # 获取目标全局距离单元索引
-                        global_range_bin = int(params.track_no_info[2])
+                # 2D-CFAR 检测和掩码生成
+                processed_rd = cfar_detector_2d(
+                    rd_matrix=rd_matrix,
+                    velocity_axis=velocity_axis,
+                    detection_area_rows=np.arange(range_start_local, range_end_local),
+                    detection_area_cols=np.arange(doppler_start, doppler_end),
+                    num_guard_cells_range=2,
+                    num_training_cells_range=4,
+                    num_guard_cells_doppler=2,
+                    num_training_cells_doppler=4,
+                    cfar_threshold_factor=6.5
+                )
 
-                        # 计算实际距离范围
-                        range_start_bin = global_range_bin - 15
-                        range_end_bin = global_range_bin + 15
+                if processed_rd is None:
+                    continue  # 未找到目标，跳过此帧
 
-                        # 计算真实距离轴
-                        range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
+                # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
+                velocity_mask = np.abs(velocity_axis) < 56
+                velocity_axis = velocity_axis[velocity_mask]
+                rd_matrix = rd_matrix[:, velocity_mask]
+                rd_matrix = np.clip(rd_matrix, 1, 1e10)
+                rd_matrix = 20 * np.log10(rd_matrix)
 
-                        # 转换到全局距离位置
-                        detected_range_bin = range_start_local + amp_max_index_row
-                        if detected_range_bin >= len(range_plot):
-                            continue
+                rd_matrix = rd_matrix[:, :, None]
+                if self.image_transform:
+                    rd_matrix = self.image_transform(rd_matrix)
+                rd_matrices.append(rd_matrix)
+                point_index.append(index)
 
-                        # 安全地计算多普勒速度
-                        doppler_idx = doppler_start + amp_max_index_col
-                        if doppler_idx >= len(v_axis):
-                            continue
-
-                        # 保存MTD处理结果
-                        rd_matrix = mtd_result
-                        velocity_axis = v_axis
-                        velocity_mask = np.abs(velocity_axis) < 56
-                        velocity_axis = velocity_axis[velocity_mask]
-                        rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
-                        rd_matrix = np.abs(rd_matrix)
-                        rd_matrix = np.clip(rd_matrix, 1e-10, 1e10)
-                        rd_matrix = 20 * np.log10(rd_matrix)
-                        velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
-
-                        # for i in range(3):
-                        #     col1 = rd_matrix[:, velocity_index + i]
-                        #     col2 = rd_matrix[:, velocity_index - i]
-                        #     col1 = torch.from_numpy(col1).float()
-                        #     col2 = torch.from_numpy(col2).float()
-                        #     col_concat = torch.stack([col1, col2]).to(self.device)
-                        #     output = self.fc_model(col_concat)
-                        #     _, pred = torch.max(output, 1)
-                        #     if pred[0].item() == 0:
-                        #         rd_matrix[:, velocity_index + i] = 0
-                        #     if pred[1].item() == 0:
-                        #         rd_matrix[:, velocity_index - i] = 0
-                        #     if pred[0].item() == 1 or pred[1].item() == 1:
-                        #         break
-                        #
-                        # # 2D-CFAR 检测和掩码生成
-                        # processed_rd = cfar_detector_2d(
-                        #     rd_matrix_db=rd_matrix,
-                        #     num_guard_cells_range=2,
-                        #     num_training_cells_range=4,
-                        #     num_guard_cells_doppler=2,
-                        #     num_training_cells_doppler=4,
-                        #     cfar_threshold_factor_db=6
-                        # )
-                        #
-                        # if processed_rd is None:
-                        #     continue  # 未找到目标，跳过此帧
-                        #
-                        # rd_matrix = processed_rd
-
-                        if label <= 2:
-                            rd_matrix[:, velocity_index - 3:velocity_index + 4] = 0
-
-                        # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
-                        rd_matrix = rd_matrix[:, :, None]
-                        if self.image_transform:
-                            rd_matrix = self.image_transform(rd_matrix)
-                        index = min(params.track_no_info[1], num_points)
-                        rd_matrices.append(rd_matrix)
-                        point_index.append(index)
-
-                    except Exception as e:
-                        # 静默跳过有问题的帧，避免过多错误输出
-                        continue
-
-        except Exception as e:
-            raise ValueError(f"读取原始数据文件失败：{str(e)}")
-
-        rd_matrices = np.stack(rd_matrices, axis=0)
-        point_index = np.array(point_index, dtype=np.int32)
+        if rd_matrices:
+            rd_matrices = np.stack(rd_matrices, axis=0)
+            point_index = np.array(point_index, dtype=np.int32)
         return rd_matrices, point_index
 
     @staticmethod
@@ -917,6 +985,8 @@ class FusedDataset(Dataset):
 def collate_fn(batch):
     batch_files, point_indices, stacked_images, stacked_tracks, image_masks, track_masks, labels = [], [], [], [], [], [], []
     for (batch_file, point_index, images, merged_data, image_mask, track_mask, cls) in batch:
+        if images is None or merged_data is None:
+            continue
         batch_files.append(batch_file)
         point_indices.append(point_index)
         stacked_images.append(images)
@@ -938,14 +1008,15 @@ if __name__ == '__main__':
     from fusion.models.fc import FC
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    batch = 1
+    batch = 33
     label = 1
     batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
-                           os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_25.txt"),
-                           os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_25.txt"))
+                           os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_23.txt"),
+                           os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_23.txt"))
     model = FC(31, 2, 256, 0.2)
     model.load_state_dict(torch.load("../ckpt/fc_model.pth", weights_only=False)['state_dict'])
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     rd_matrices, ranges, velocities = process_batch(batch_file, model, device)
-    visualize_rd_matrix(rd_matrices[9], ranges[9], velocities[9], batch, label, 9)
+    for i in range(min(50, len(rd_matrices))):
+        visualize_rd_matrix(rd_matrices[i], ranges[i], velocities[i], batch, label, i)
