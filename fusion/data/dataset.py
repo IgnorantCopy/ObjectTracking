@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset
 import polars as pl
 
-from preprocess import *
+from .preprocess import *
 
 
 TOTAL_FEATURES_PER_TIMESTEP = 21
@@ -228,24 +228,14 @@ class FusedDataset(Dataset):
 
                 velocity_index = np.where(velocity_axis == 0)[0][0]
                 index = min(params.track_no_info[1], num_points)
-                # point_df = pl.read_csv(batch.point_file, has_header=True, separator=",", encoding="gbk")
-                # doppler_velocity = point_df["多普勒速度"][int(index) - 1]
-                # for i in range(3):
-                #     if abs(doppler_velocity) > velocity_axis[velocity_index + i]:
-                #         rd_matrix[:, velocity_index + i] = 0
-                #         rd_matrix[:, velocity_index - i] = 0
-                temp_rd_matrix = rd_matrix.copy()
-                # temp_rd_matrix[:, velocity_index-1:velocity_index+2] = 0
-                for i in range(len(temp_rd_matrix)):
-                    x = [velocity_index - 2, velocity_index + 2]
-                    y = [temp_rd_matrix[i, x[xx]] for xx in range(len(x))]
-                    x_pred = [velocity_index - 1, velocity_index, velocity_index + 1]
-                    y_pred = np.interp(x_pred, x, y)
-                    temp_rd_matrix[i, x[0]+1:x[1]] = y_pred
+                point_df = pl.read_csv(batch.point_file, has_header=True, separator=",", encoding="gbk")
+                doppler_velocity = point_df["多普勒速度"][int(index) - 1]
+                if abs(doppler_velocity) > 5:
+                    rd_matrix[:, velocity_index-1:velocity_index+2] = 0
 
                 # 2D-CFAR 检测和掩码生成
                 processed_rd = cfar_detector_2d(
-                    rd_matrix=temp_rd_matrix,
+                    rd_matrix=rd_matrix,
                     velocity_axis=velocity_axis,
                     detection_area_rows=np.arange(range_start_local, range_end_local),
                     detection_area_cols=np.arange(doppler_start, doppler_end),
@@ -257,21 +247,7 @@ class FusedDataset(Dataset):
                 )
 
                 if processed_rd is None:
-                    processed_rd = cfar_detector_2d(
-                        rd_matrix=rd_matrix,
-                        velocity_axis=velocity_axis,
-                        detection_area_rows=np.arange(range_start_local, range_end_local),
-                        detection_area_cols=np.arange(doppler_start, doppler_end),
-                        num_guard_cells_range=2,
-                        num_training_cells_range=4,
-                        num_guard_cells_doppler=2,
-                        num_training_cells_doppler=4,
-                        cfar_threshold_factor=6.5
-                    )
-                    if processed_rd is None:
-                        continue  # 未找到目标，跳过此帧
-                else:
-                    rd_matrix = temp_rd_matrix
+                    continue  # 未找到目标，跳过此帧
 
                 # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                 velocity_mask = np.abs(velocity_axis) < 56
@@ -306,7 +282,7 @@ class FusedDataset(Dataset):
             df_track = pl.from_pandas(preprocessed_data['track_data'])
 
             # 2. 数据类型转换和合并
-            df = df_point.join(df_track, on=["点时间", "批号"], how="left").sort("点时间")
+            df = df_point.join(df_track, on=["时间", "批号"], how="left").sort("时间")
 
             # 3. 特征工程 (基于用户提供的新逻辑)
             # 3.1 计算衍生的时序特征

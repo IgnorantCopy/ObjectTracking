@@ -665,7 +665,7 @@ class TrajectoryDataProcessor(object):
     点迹和航迹数据处理类，包含异常值检测和插值修复
     """
 
-    def __init__(self, point_file_path, track_file_path,
+    def __init__(self, point_file_path, track_file_path, verbose=False,
                  outlier_threshold=3.0, interpolation_method='linear',
                  velocity_threshold=100.0, doppler_threshold=50.0):
         """
@@ -685,6 +685,7 @@ class TrajectoryDataProcessor(object):
         self.interpolation_method = interpolation_method
         self.velocity_threshold = velocity_threshold
         self.doppler_threshold = doppler_threshold
+        self.verbose = verbose
 
         # 数据存储
         self.point_data = None
@@ -715,7 +716,7 @@ class TrajectoryDataProcessor(object):
 
     def _load_point_data(self):
         """加载点迹数据"""
-        columns = ['时间', '批号', '距离', '方位', '俯仰', '多普勒速度', '幅度', '信噪比', '原始点数量']
+        columns = ['时间', '批号', '距离', '方位', '俯仰', '多普勒速度', '和幅度', '信噪比', '原始点数量']
 
         try:
             data = pd.read_csv(self.point_file_path, encoding='gbk', header=0, names=columns)
@@ -931,7 +932,8 @@ class TrajectoryDataProcessor(object):
             combined_outliers = zscore_outliers | velocity_outliers | iqr_outliers
 
             if combined_outliers.sum() > 0:
-                print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个多普勒速度异常值")
+                if self.verbose:
+                    print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个多普勒速度异常值")
                 corrected_doppler = self._interpolate_outliers(doppler_series, combined_outliers)
                 processed_data.loc[batch_mask, '多普勒速度'] = corrected_doppler.values
 
@@ -941,7 +943,8 @@ class TrajectoryDataProcessor(object):
                     series = batch_data[col]
                     outliers = self._detect_outliers_zscore(series)
                     if outliers.sum() > 0:
-                        print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
+                        if self.verbose:
+                            print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
                         # corrected_series = self._interpolate_outliers(series, outliers)
                         corrected_series = self._extrapolate_outliers(series, outliers)
                         processed_data.loc[batch_mask, col] = corrected_series.values
@@ -1017,14 +1020,33 @@ class TrajectoryDataProcessor(object):
 
 
 if __name__ == '__main__':
+    import plotly.graph_objects as go
+
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
     save_dir = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/processed_data"
     point_files = glob.glob(os.path.join(data_root, "点迹", "PointTracks_*.txt"))
+    dopplers = {'1': [], '2': [], '3': [], '4': []}
     for point_file in tqdm(point_files, desc="处理异常数据"):
         re_result = re.match(r"PointTracks_(\d+)_(\d+)_(\d+).txt", os.path.basename(point_file))
         batch_id = re_result.group(1)
         label = re_result.group(2)
+        if int(label) > 4:
+            continue
         num_points = re_result.group(3)
         track_file = os.path.join(data_root, "航迹", f"Tracks_{batch_id}_{label}_{num_points}.txt")
         preprocessor = TrajectoryDataProcessor(point_file_path=point_file, track_file_path=track_file)
-        preprocessor.save_processed_data(output_dir=save_dir)
+        result = preprocessor.get_processed_data()
+        point_df = result['point_data']
+        for i in range(len(point_df)):
+            doppler = point_df['多普勒速度'][i]
+            dopplers[label].append(doppler)
+    for k, v in dopplers.items():
+        fig = go.Figure(data=[go.Histogram(x=v, histnorm='probability', nbinsx=30)])
+        fig.update_layout(
+            title_text="Delta Distribution",
+            xaxis_title_text="Delta",
+            yaxis_title_text="Probability",
+            bargap=0.2,
+            bargroupgap=0.1
+        )
+        fig.show()
