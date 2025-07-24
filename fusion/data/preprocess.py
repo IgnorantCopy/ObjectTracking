@@ -1,20 +1,16 @@
 import os
 import re
+import glob
 import struct
-import random
 import numpy as np
-import torch
-from torch.utils.data import Dataset
-import polars as pl
-from scipy import signal
+import pandas as pd
+from scipy import signal, interpolate
 from scipy.fft import fft, fftshift
+from scipy.stats import zscore
 from dataclasses import dataclass
 from pathlib import Path
+from tqdm import tqdm
 
-
-TOTAL_FEATURES_PER_TIMESTEP = 21
-
-ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
 FS = 20e6  # 采样率 (20 MHz)
 C = 3e8    # 光速 (m/s)
@@ -557,10 +553,11 @@ def process_batch(batch: BatchFile, model, device):
             rd_matrix = np.abs(rd_matrix)
             velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
             rd_matrix[:, velocity_index] = 0
-
+            temp_rd_matrix = rd_matrix.copy()
+            temp_rd_matrix[:, velocity_index - 1:velocity_index + 2] = 0
             # 2D-CFAR 检测和掩码生成
             processed_rd = cfar_detector_2d(
-                rd_matrix=rd_matrix,
+                rd_matrix=temp_rd_matrix,
                 velocity_axis=velocity_axis.reshape(-1),
                 detection_area_rows=np.arange(range_start_local, range_end_local),
                 detection_area_cols=np.arange(doppler_start, doppler_end),
@@ -572,10 +569,22 @@ def process_batch(batch: BatchFile, model, device):
             )
 
             if processed_rd is None:
-                print(f"帧 {frame_count} 未找到目标")
-                continue  # 未找到目标，跳过此帧
-
-            rd_matrix = processed_rd
+                processed_rd = cfar_detector_2d(
+                    rd_matrix=rd_matrix,
+                    velocity_axis=velocity_axis.reshape(-1),
+                    detection_area_rows=np.arange(range_start_local, range_end_local),
+                    detection_area_cols=np.arange(doppler_start, doppler_end),
+                    num_guard_cells_range=2,
+                    num_training_cells_range=4,
+                    num_guard_cells_doppler=2,
+                    num_training_cells_doppler=4,
+                    cfar_threshold_factor=6.5
+                )
+                if processed_rd is None:
+                    print(f"帧 {frame_count} 未找到目标，跳过该帧")
+                    continue  # 未找到目标，跳过此帧
+            else:
+                rd_matrix = temp_rd_matrix
             velocity_mask = np.abs(velocity_axis) < 56
             velocity_axis = velocity_axis[velocity_mask]
             rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
@@ -651,372 +660,371 @@ def get_batch_file_list(root_dir: str):
     return batch_files
 
 
-def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
-    label_nums = [0 for _ in range(num_classes)]
-    batch_files_by_cls = [[] for _ in range(num_classes)]
-    batch_files = get_batch_file_list(data_root)
-    for batch_file in batch_files:
-        cls = batch_file.label - 1
-        if cls < 0 or cls >= num_classes or batch_file.batch_num in ABNORMAL_BATCH_ID:
-            continue
-        label_nums[cls] += 1
-        batch_files_by_cls[cls].append(batch_file)
-    train_nums = [int(num * (1 - val_ratio)) for num in label_nums]
-    val_nums = [num - train_num for num, train_num in zip(label_nums, train_nums)]
-    train_batch_files, val_batch_files = [], []
-    for i, batch_file in enumerate(batch_files_by_cls):
-        if shuffle:
-            random.shuffle(batch_file)
-        train_batch_files.extend(batch_file[:train_nums[i]])
-        val_batch_files.extend(batch_file[train_nums[i]:train_nums[i] + val_nums[i]])
-    return train_batch_files, val_batch_files
+class TrajectoryDataProcessor(object):
+    """
+    点迹和航迹数据处理类，包含异常值检测和插值修复
+    """
 
-
-class FusedDataset(Dataset):
-    def __init__(self, batch_files: list[BatchFile], fc_model, device, image_transform=None, track_transform=None,
-                 image_seq_len=180, track_seq_len=29):
-        super().__init__()
-        self.batch_files = batch_files
-        self.image_transform = image_transform
-        self.track_transform = track_transform
-        self.image_seq_len = image_seq_len
-        self.track_seq_len = track_seq_len
-        self.fc_model = fc_model
-        self.device = device
-
-    def __len__(self):
-        return len(self.batch_files)
-
-    def __getitem__(self, item):
-        batch_file = self.batch_files[item]
-        point_file = batch_file.point_file
-        track_file = batch_file.track_file
-        num_points = int(os.path.basename(point_file).split('_')[-1].split('.')[0])
-        cls = batch_file.label - 1
-
-        # load rd map
-        images, point_index = self._process_batch(batch_file, num_points)
-        if len(images) == 0:
-            return batch_file, None, None, None, None, None, cls
-
-        image_mask = np.ones((self.image_seq_len,), dtype=np.int32)
-        if images.shape[0] < self.image_seq_len:
-            image_mask[images.shape[0]:] = 0
-            images = np.concatenate([
-                images,
-                np.zeros((self.image_seq_len - images.shape[0], *images.shape[1:]))
-            ], axis=0)
-            point_index = np.concatenate([
-                point_index,
-                np.array([point_index[-1] for _ in range(self.image_seq_len - point_index.shape[0])])
-            ], axis=0)
-        elif images.shape[0] > self.image_seq_len:
-            quantiles = np.linspace(0, 1, self.image_seq_len)
-            indices = np.floor(quantiles * (images.shape[0] - 1)).astype(int)
-            images = images[indices]
-            point_index = point_index[indices]
-        assert images.shape[0] == self.image_seq_len, f"RD 图数量与预期不符: {images.shape[0]}, {self.image_seq_len}"
-
-        # load point and track data
-        merged_data = self._load_and_merge_data(point_file, track_file)
-        if len(merged_data) == 0:
-            return batch_file, None, None, None, None, None, cls
-        if merged_data.dtype != np.float32:
-            merged_data = merged_data.astype(np.float32)
-        track_mask = np.ones((self.track_seq_len,), dtype=np.int32)
-        if merged_data.shape[0] < self.track_seq_len:
-            track_mask[merged_data.shape[0]:] = 0
-            merged_data = np.concatenate([
-                merged_data,
-                np.zeros((self.track_seq_len - merged_data.shape[0], TOTAL_FEATURES_PER_TIMESTEP))
-            ], axis=0)
-        elif merged_data.shape[0] > self.track_seq_len:
-            merged_data = merged_data[:self.track_seq_len]
-        assert merged_data.shape[0] == self.track_seq_len, f"点迹数量与预期不符: {merged_data.shape[0]}, {self.track_seq_len}"
-        if self.track_transform:
-            merged_data = self.track_transform(merged_data)
-
-        return batch_file, point_index, images, merged_data, image_mask, track_mask, cls
-
-    def _process_batch(self, batch: BatchFile, num_points: int):
-        """处理单个批次的数据"""
-        # 打开原始数据文件
-        frame_count = 0
-        rd_matrices = []
-        point_index = []
-        label = batch.label
-
-        with open(batch.raw_file, 'rb') as fid:
-            while True:
-                params, data = read_raw_data(fid)
-                if params is None or data is None:
-                    break
-
-                frame_count += 1
-
-                # 跳过没有航迹信息的帧
-                if len(params.track_no_info) == 0:
-                    continue
-
-                # 添加数据验证
-                if len(params.track_no_info) < 4:
-                    continue
-
-                # 验证参数有效性
-                if params.prt <= 0 or params.prt_num <= 0 or params.freq <= 0:
-                    continue
-
-                # MTD处理
-                distance_bins = data.shape[0]  # 距离单元数 (31)
-                prt_bins = data.shape[1]  # PRT数
-                # 生成泰勒窗 - 使用PRT数作为窗长，匹配MATLAB
-                mtd_win = signal.windows.taylor(distance_bins, nbar=4, sll=30, norm=False)
-                mtd_win_col = mtd_win.reshape(-1, 1)
-                # 在距离维度重复窗函数
-                coef_mtd_2d = np.repeat(mtd_win_col, prt_bins, axis=1)
-                # 加窗处理
-                data_windowed = data * coef_mtd_2d
-                # FFT处理 - 在PRT维度（轴1）进行FFT
-                mtd_result = fftshift(fft(data_windowed, axis=1), axes=1)
-
-                # 计算多普勒速度轴 - 修复溢出问题
-                try:
-                    delta_v = C / (2 * params.prt_num * params.prt * params.freq)
-
-                    # 检查delta_v是否有效
-                    if not np.isfinite(delta_v) or delta_v <= 0 or delta_v > 10000:
-                        print(f"警告：帧 {frame_count} delta_v异常: {delta_v}, 跳过该帧")
-                        continue
-
-                    # 修复溢出问题 - 使用更安全的方式
-                    half_prt = params.prt_num // 2
-
-                    # 检查half_prt是否合理
-                    if half_prt <= 0 or half_prt > 10000:
-                        print(f"警告：帧 {frame_count} half_prt异常: {half_prt}, 跳过该帧")
-                        continue
-
-                    # 使用int32避免溢出
-                    v_start = -int(half_prt)
-                    v_end = int(half_prt)
-                    v_indices = np.arange(v_start, v_end, dtype=np.int32)
-                    v_axis = v_indices.astype(np.float64) * delta_v
-
-                    # 检查v_axis是否有效
-                    if not np.all(np.isfinite(v_axis)) or len(v_axis) != params.prt_num:
-                        print(
-                            f"警告：帧 {frame_count} v_axis异常，长度:{len(v_axis)}, 期望:{params.prt_num}, 跳过该帧")
-                        continue
-
-                except Exception as e:
-                    print(f"警告：帧 {frame_count} 计算速度轴时出错: {str(e)}")
-                    continue
-
-                # 目标检测
-                amp_max_vr_unit = int(params.track_no_info[3])
-
-                # 修正多普勒索引
-                if amp_max_vr_unit > half_prt:
-                    amp_max_vr_unit = amp_max_vr_unit - half_prt
-                else:
-                    amp_max_vr_unit = amp_max_vr_unit + half_prt
-
-                # 转换为Python的0-based索引
-                amp_max_vr_unit = amp_max_vr_unit - 1
-
-                # 确保索引在有效范围内
-                amp_max_vr_unit = np.clip(amp_max_vr_unit, 0, params.prt_num - 1)
-
-                # 目标中心位于第16个距离单元
-                center_local_bin = 15
-                local_radius = 5
-
-                # 计算局部检测窗口
-                range_start_local = max(0, center_local_bin - local_radius)
-                range_end_local = min(mtd_result.shape[0], center_local_bin + local_radius + 1)
-                doppler_start = max(0, amp_max_vr_unit - local_radius)
-                doppler_end = min(mtd_result.shape[1], amp_max_vr_unit + local_radius + 1)
-
-                target_sig = mtd_result[range_start_local:range_end_local, doppler_start:doppler_end]
-
-                # 检测峰值
-                abs_target = np.abs(target_sig)
-                if abs_target.size == 0:
-                    continue
-
-                max_idx = np.unravel_index(np.argmax(abs_target), abs_target.shape)
-                amp_max_index_row, amp_max_index_col = max_idx
-
-                # 获取目标全局距离单元索引
-                global_range_bin = int(params.track_no_info[2])
-
-                # 计算实际距离范围
-                range_start_bin = global_range_bin - 15
-                range_end_bin = global_range_bin + 15
-
-                # 计算真实距离轴
-                range_plot = np.arange(range_start_bin, range_end_bin + 1) * DELTA_R
-
-                # 转换到全局距离位置
-                detected_range_bin = range_start_local + amp_max_index_row
-                if detected_range_bin >= len(range_plot):
-                    continue
-
-                # 安全地计算多普勒速度
-                doppler_idx = doppler_start + amp_max_index_col
-                if doppler_idx >= len(v_axis):
-                    continue
-
-                # 保存MTD处理结果
-                rd_matrix = mtd_result
-                velocity_axis = v_axis.reshape(-1)
-                rd_matrix = np.abs(rd_matrix)
-
-                velocity_index = np.where(velocity_axis == 0)[0][0]
-                index = min(params.track_no_info[1], num_points)
-                point_df = pl.read_csv(batch.point_file, has_header=True, separator=",", encoding="gbk")
-                doppler_velocity = point_df["多普勒速度"][int(index) - 1]
-                for i in range(3):
-                    if abs(doppler_velocity) > velocity_axis[velocity_index + i]:
-                        rd_matrix[:, velocity_index + i] = 0
-                        rd_matrix[:, velocity_index - i] = 0
-
-                # 2D-CFAR 检测和掩码生成
-                processed_rd = cfar_detector_2d(
-                    rd_matrix=rd_matrix,
-                    velocity_axis=velocity_axis,
-                    detection_area_rows=np.arange(range_start_local, range_end_local),
-                    detection_area_cols=np.arange(doppler_start, doppler_end),
-                    num_guard_cells_range=2,
-                    num_training_cells_range=4,
-                    num_guard_cells_doppler=2,
-                    num_training_cells_doppler=4,
-                    cfar_threshold_factor=6.5
-                )
-
-                if processed_rd is None:
-                    continue  # 未找到目标，跳过此帧
-
-                # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
-                velocity_mask = np.abs(velocity_axis) < 56
-                velocity_axis = velocity_axis[velocity_mask]
-                rd_matrix = rd_matrix[:, velocity_mask]
-                rd_matrix = np.clip(rd_matrix, 1, 1e10)
-                rd_matrix = 20 * np.log10(rd_matrix)
-
-                rd_matrix = rd_matrix[:, :, None]
-                if self.image_transform:
-                    rd_matrix = self.image_transform(rd_matrix)
-                rd_matrices.append(rd_matrix)
-                point_index.append(index)
-
-        if rd_matrices:
-            rd_matrices = np.stack(rd_matrices, axis=0)
-            point_index = np.array(point_index, dtype=np.int32)
-        return rd_matrices, point_index
-
-    @staticmethod
-    def _load_and_merge_data(point_track_filepath, track_filepath):
+    def __init__(self, point_file_path, track_file_path,
+                 outlier_threshold=3.0, interpolation_method='linear',
+                 velocity_threshold=100.0, doppler_threshold=50.0):
         """
-        使用 polars 高效加载、合并数据并进行特征工程
-        :param point_track_filepath: 点迹文件路径
-        :param track_filepath: 航迹文件路径
-        :return: 合并和处理后的特征数据 (NumPy Array)
+        初始化数据处理器
+
+        Args:
+            point_file_path: 点迹文件路径
+            track_file_path: 航迹文件路径
+            outlier_threshold: Z-score异常值阈值
+            interpolation_method: 插值方法 ('linear', 'cubic', 'quadratic')
+            velocity_threshold: 速度异常值阈值
+            doppler_threshold: 多普勒速度异常值阈值
         """
+        self.point_file_path = point_file_path
+        self.track_file_path = track_file_path
+        self.outlier_threshold = outlier_threshold
+        self.interpolation_method = interpolation_method
+        self.velocity_threshold = velocity_threshold
+        self.doppler_threshold = doppler_threshold
+
+        # 数据存储
+        self.point_data = None
+        self.track_data = None
+        self.processed_point_data = None
+        self.processed_track_data = None
+
+        # 处理数据
+        if point_file_path or track_file_path:
+            self.load_and_process_data()
+
+    def load_and_process_data(self):
+        """加载并处理数据"""
+
+        # 加载原始数据
+        if self.point_file_path:
+            self.point_data = self._load_point_data()
+
+        if self.track_file_path:
+            self.track_data = self._load_track_data()
+
+        # 处理异常值
+        if self.point_data is not None:
+            self.processed_point_data = self._process_point_outliers()
+
+        if self.track_data is not None:
+            self.processed_track_data = self._process_track_outliers()
+
+    def _load_point_data(self):
+        """加载点迹数据"""
+        columns = ['时间', '批号', '距离', '方位', '俯仰', '多普勒速度', '幅度', '信噪比', '原始点数量']
+
         try:
-            # 1. 加载数据，并明确指定有表头
-            df_point = pl.read_csv(point_track_filepath, has_header=True, separator=",", encoding="gbk")
-            df_track = pl.read_csv(track_filepath, has_header=True, separator=",", encoding="gbk")
-
-            # 2. 数据类型转换和合并
-            df = df_point.join(df_track, on=["点时间", "批号"], how="left").sort("点时间")
-
-            # 3. 特征工程 (基于用户提供的新逻辑)
-            # 3.1 计算衍生的时序特征
-            df = df.with_columns(
-                (pl.col("滤波距离") * pl.col("滤波俯仰").radians().sin()).alias("高度"),
-                (pl.col("X向速度").pow(2) + pl.col("Y向速度").pow(2)).sqrt().alias("水平速度"),
-            )
-
-            df = df.with_columns(
-                pl.arctan2(pl.col("Z向速度"), pl.col("水平速度")).alias("爬升/俯冲角度_弧度"),
-                (pl.col("和幅度") * pl.col("滤波距离").pow(4)).log10().alias("RCS"),
-            )
-
-            # 3.2 计算整个序列的统计特征
-            df = df.with_columns(
-                pl.col("全速度").min().alias("最小全速度"),
-                pl.col("全速度").mean().alias("平均全速度"),
-                pl.col("水平速度").mean().alias("平均水平速度"),
-                pl.col("高度").mean().alias("平均高度"),
-                pl.col("高度").max().alias("最大高度"),
-                pl.col("高度").min().alias("最小高度"),
-                (pl.col("高度").max() - pl.col("高度").min()).alias("高度波动范围"),
-                pl.col("高度").std().alias("高度标准差"),
-                pl.col("全速度").max().alias("最大全速度"),
-                pl.col("水平速度").max().alias("最大水平速度"),
-                pl.col("水平速度").min().alias("最小水平速度"),
-                (pl.col("水平速度").max() - pl.col("水平速度").min()).alias("水平速度波动范围"),
-            )
-
-            # 4. 选择最终的特征
-            final_feature_columns = [
-                # 衍生特征
-                "高度", "水平速度", "爬升/俯冲角度_弧度", "RCS",
-                # 统计特征
-                "最小全速度", "平均全速度", "平均水平速度", "平均高度",
-                "最大高度", "最小高度", "高度波动范围", "高度标准差",
-                "最大全速度", "最大水平速度", "最小水平速度", "水平速度波动范围",
-                # 原始特征
-                "俯仰", "多普勒速度", "和幅度", "信噪比", "原始点数量"
-            ]
-            df_final_features = df.select(final_feature_columns)
-
-            # 5. 一次性填充所有因计算差分等产生的空值
-            df_final_features = df_final_features.fill_null(0.0).fill_nan(0.0)
-
-            return df_final_features.to_numpy(order='c').astype(np.float32)
-
+            data = pd.read_csv(self.point_file_path, encoding='gbk', header=0, names=columns)
+            # 转换时间格式
+            data['时间'] = pd.to_datetime(data['时间'], format='%H:%M:%S.%f')
+            return data
         except Exception as e:
-            print(f"处理文件时出错 {point_track_filepath}: {e}")
+            print(f"加载点迹数据失败: {e}")
             return None
 
+    def _load_track_data(self):
+        """加载航迹数据"""
+        columns = ['时间', '批号', '滤波距离', '滤波方位', '滤波俯仰', '全速度',
+                   'X向速度', 'Y向速度', 'Z向速度', '航向']
 
-def collate_fn(batch):
-    batch_files, point_indices, stacked_images, stacked_tracks, image_masks, track_masks, labels = [], [], [], [], [], [], []
-    for (batch_file, point_index, images, merged_data, image_mask, track_mask, cls) in batch:
-        if images is None or merged_data is None:
-            continue
-        batch_files.append(batch_file)
-        point_indices.append(point_index)
-        stacked_images.append(images)
-        stacked_tracks.append(merged_data)
-        image_masks.append(image_mask)
-        track_masks.append(track_mask)
-        labels.append(cls)
-    point_indices = torch.from_numpy(np.stack(point_indices, axis=0))
-    stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
-    stacked_tracks = torch.from_numpy(np.stack(stacked_tracks, axis=0))
-    image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
-    track_masks = torch.from_numpy(np.stack(track_masks, axis=0))
-    labels = torch.tensor(labels, dtype=torch.long)
-    return batch_files, point_indices, stacked_images, stacked_tracks, image_masks, track_masks, labels
+        try:
+            data = pd.read_csv(self.track_file_path, encoding='gbk', header=0, names=columns)
+            # 转换时间格式
+            data['时间'] = pd.to_datetime(data['时间'], format='%H:%M:%S.%f')
+            return data
+        except Exception as e:
+            print(f"加载航迹数据失败: {e}")
+            return None
+
+    def _detect_outliers_zscore(self, series, threshold=None):
+        """使用Z-score检测异常值"""
+        if threshold is None:
+            threshold = self.outlier_threshold
+
+        if len(series) <= 1:
+            return pd.Series([False] * len(series), index=series.index)
+
+        z_scores = np.abs(zscore(series, nan_policy='omit'))
+        return pd.Series(z_scores > threshold, index=series.index)
+
+    def _detect_outliers_iqr(self, series):
+        """使用IQR方法检测异常值"""
+        Q1 = series.quantile(0.25)
+        Q3 = series.quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        return (series < lower_bound) | (series > upper_bound)
+
+    def _detect_velocity_outliers(self, series, threshold):
+        """检测速度异常值（绝对值过大）"""
+        return np.abs(series) > threshold
+
+    def _extrapolate_outliers(self, series, outlier_mask):
+        """
+        使用外插法修复异常值 - 只使用异常值之前的数据进行预测
+        """
+        if outlier_mask.sum() == 0:
+            return series.copy()
+
+        series_copy = series.copy()
+
+        # 按时间顺序处理每个异常点
+        indices = np.arange(len(series))
+        for i in indices[outlier_mask]:
+            # 只使用当前点之前的有效数据点
+            prior_indices = indices[:i]
+            prior_valid_mask = ~outlier_mask.iloc[prior_indices]
+            prior_valid_indices = prior_indices[prior_valid_mask]
+
+            # 如果之前没有足够的有效点，尝试使用全局有效点的均值
+            if len(prior_valid_indices) < 2:
+                all_valid_indices = indices[~outlier_mask]
+                if len(all_valid_indices) >= 1:
+                    # 使用所有有效点的均值
+                    fill_value = series.iloc[all_valid_indices].mean()
+                    if pd.isna(fill_value):
+                        fill_value = 0
+                    series_copy.iloc[i] = fill_value
+                else:
+                    # 没有有效点时使用0填充
+                    series_copy.iloc[i] = 0
+                continue
+
+            # 获取之前的有效点的数据
+            x_prior = prior_valid_indices
+            y_prior = series.iloc[prior_valid_indices].values
+
+            try:
+                # 根据插值方法选择不同的模型
+                if self.interpolation_method == 'linear':
+                    # 线性外插
+                    model = np.polyfit(x_prior, y_prior, 1)
+                    predicted_value = np.polyval(model, i)
+                elif self.interpolation_method == 'quadratic' and len(x_prior) >= 3:
+                    # 二次多项式外插
+                    model = np.polyfit(x_prior, y_prior, 2)
+                    predicted_value = np.polyval(model, i)
+                elif self.interpolation_method == 'cubic' and len(x_prior) >= 4:
+                    # 三次多项式外插
+                    model = np.polyfit(x_prior, y_prior, 3)
+                    predicted_value = np.polyval(model, i)
+                elif self.interpolation_method == 'exp':
+                    # 指数模型外插 (适用于指数型增长数据)
+                    # 对y取对数，再用线性拟合
+                    if np.all(y_prior > 0):  # 确保所有值为正
+                        log_y = np.log(y_prior)
+                        model = np.polyfit(x_prior, log_y, 1)
+                        predicted_value = np.exp(np.polyval(model, i))
+                    else:
+                        # 若有非正值，使用线性模型
+                        model = np.polyfit(x_prior, y_prior, 1)
+                        predicted_value = np.polyval(model, i)
+                else:
+                    # 默认使用线性外插
+                    model = np.polyfit(x_prior, y_prior, 1)
+                    predicted_value = np.polyval(model, i)
+
+                # 防止异常值
+                if np.isnan(predicted_value) or np.isinf(predicted_value):
+                    # 使用最近的有效值
+                    predicted_value = series.iloc[prior_valid_indices[-1]]
+
+                # 更新值
+                series_copy.iloc[i] = predicted_value
+
+            except Exception as e:
+                print(f"外插失败: {e}, 使用最近的有效值填充")
+                # 使用最近的有效值填充
+                if len(prior_valid_indices) > 0:
+                    series_copy.iloc[i] = series.iloc[prior_valid_indices[-1]]
+                else:
+                    # 没有先前的有效值，尝试使用全局均值
+                    all_valid_indices = indices[~outlier_mask]
+                    if len(all_valid_indices) >= 1:
+                        series_copy.iloc[i] = series.iloc[all_valid_indices].mean()
+                    else:
+                        series_copy.iloc[i] = 0
+
+        return series_copy
+
+    def _interpolate_outliers(self, series, outlier_mask):
+        """插值修复异常值"""
+        if outlier_mask.sum() == 0:
+            return series.copy()
+
+        series_copy = series.copy()
+        valid_indices = ~outlier_mask
+
+        if valid_indices.sum() < 2:
+            # 如果有效点太少，用均值填充
+            fill_value = series[valid_indices].mean()
+            if pd.isna(fill_value):  # 如果均值为NaN，尝试用中位数
+                fill_value = series.median()
+                if pd.isna(fill_value):  # 如果中位数也为NaN，用0填充
+                    fill_value = 0
+            series_copy[outlier_mask] = fill_value
+            return series_copy
+
+        # 获取有效数据点
+        valid_x = np.where(valid_indices)[0]
+        valid_y = series[valid_indices].values
+
+        # 需要插值的点
+        outlier_x = np.where(outlier_mask)[0]
+
+        try:
+            if self.interpolation_method == 'linear':
+                f = interpolate.interp1d(valid_x, valid_y, kind='linear',
+                                         bounds_error=False, fill_value='extrapolate')
+            elif self.interpolation_method == 'cubic' and len(valid_x) >= 4:
+                f = interpolate.interp1d(valid_x, valid_y, kind='cubic',
+                                         bounds_error=False, fill_value='extrapolate')
+            elif self.interpolation_method == 'quadratic' and len(valid_x) >= 3:
+                f = interpolate.interp1d(valid_x, valid_y, kind='quadratic',
+                                         bounds_error=False, fill_value='extrapolate')
+            else:
+                f = interpolate.interp1d(valid_x, valid_y, kind='linear',
+                                         bounds_error=False, fill_value='extrapolate')
+
+            # 执行插值
+            interpolated_values = f(outlier_x)
+            series_copy.iloc[outlier_x] = interpolated_values
+
+        except Exception as e:
+            print(f"插值失败，使用均值填充: {e}")
+            fill_value = series[valid_indices].mean()
+            if pd.isna(fill_value):
+                fill_value = 0
+            series_copy[outlier_mask] = fill_value
+
+        return series_copy
+
+    def _process_point_outliers(self):
+        """处理点迹数据异常值"""
+        if self.point_data is None:
+            return None
+
+        processed_data = self.point_data.copy()
+
+        # 按批号分组处理
+        for batch_id in processed_data['批号'].unique():
+            batch_mask = processed_data['批号'] == batch_id
+            batch_data = processed_data[batch_mask].copy()
+
+            if len(batch_data) < 3:
+                continue
+
+            # 处理多普勒速度异常值
+            doppler_series = batch_data['多普勒速度']
+
+            # 组合检测方法
+            zscore_outliers = self._detect_outliers_zscore(doppler_series)
+            velocity_outliers = self._detect_velocity_outliers(doppler_series, self.doppler_threshold)
+            iqr_outliers = self._detect_outliers_iqr(doppler_series)
+
+            # 综合异常值检测（任意一种方法检测到就认为是异常值）
+            combined_outliers = zscore_outliers | velocity_outliers | iqr_outliers
+
+            if combined_outliers.sum() > 0:
+                print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个多普勒速度异常值")
+                corrected_doppler = self._interpolate_outliers(doppler_series, combined_outliers)
+                processed_data.loc[batch_mask, '多普勒速度'] = corrected_doppler.values
+
+            # 处理其他可能的异常值
+            for col in ['距离', '方位', '俯仰', '信噪比']:
+                if col in batch_data.columns:
+                    series = batch_data[col]
+                    outliers = self._detect_outliers_zscore(series)
+                    if outliers.sum() > 0:
+                        print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
+                        # corrected_series = self._interpolate_outliers(series, outliers)
+                        corrected_series = self._extrapolate_outliers(series, outliers)
+                        processed_data.loc[batch_mask, col] = corrected_series.values
+
+        return processed_data
+
+    def _process_track_outliers(self):
+        """处理航迹数据异常值"""
+        if self.track_data is None:
+            return None
+
+        processed_data = self.track_data.copy()
+
+        # 按批号分组处理
+        for batch_id in processed_data['批号'].unique():
+            batch_mask = processed_data['批号'] == batch_id
+            batch_data = processed_data[batch_mask].copy()
+
+            if len(batch_data) < 3:
+                continue
+
+            # 处理速度异常值
+            velocity_columns = ['X向速度', 'Y向速度', 'Z向速度', '全速度']
+
+            for col in velocity_columns:
+                if col in batch_data.columns:
+                    velocity_series = batch_data[col]
+
+                    # 检测速度异常值
+                    velocity_outliers = self._detect_velocity_outliers(velocity_series, self.velocity_threshold)
+                    zscore_outliers = self._detect_outliers_zscore(velocity_series)
+
+                    combined_outliers = velocity_outliers | zscore_outliers
+
+                    if combined_outliers.sum() > 0:
+                        print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个{col}异常值")
+                        corrected_velocity = self._interpolate_outliers(velocity_series, combined_outliers)
+                        processed_data.loc[batch_mask, col] = corrected_velocity.values
+
+            # 处理位置和角度异常值
+            for col in ['滤波距离', '滤波方位', '滤波俯仰', '航向']:
+                if col in batch_data.columns:
+                    series = batch_data[col]
+                    outliers = self._detect_outliers_zscore(series)
+                    if outliers.sum() > 0:
+                        print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
+                        # corrected_series = self._interpolate_outliers(series, outliers)
+                        corrected_series = self._extrapolate_outliers(series, outliers)
+                        processed_data.loc[batch_mask, col] = corrected_series.values
+
+        return processed_data
+
+    def get_processed_data(self):
+        """获取处理后的数据"""
+        return {
+            'point_data': self.processed_point_data,
+            'track_data': self.processed_track_data
+        }
+
+    def save_processed_data(self, output_dir='processed_data'):
+        """保存处理后的数据"""
+        os.makedirs(output_dir, exist_ok=True)
+
+        if self.processed_point_data is not None:
+            os.makedirs(os.path.join(output_dir, '点迹'), exist_ok=True)
+            point_output_path = os.path.join(output_dir, '点迹', os.path.basename(self.point_file_path))
+            self.processed_point_data.to_csv(point_output_path, index=False)
+
+        if self.processed_track_data is not None:
+            os.makedirs(os.path.join(output_dir, '航迹'), exist_ok=True)
+            track_output_path = os.path.join(output_dir, '航迹', os.path.basename(self.track_file_path))
+            self.processed_track_data.to_csv(track_output_path, index=False)
 
 
 if __name__ == '__main__':
-    from visualize import visualize_rd_matrix
-    from fusion.models.fc import FC
-
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    batch = 33
-    label = 1
-    batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
-                           os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_23.txt"),
-                           os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_23.txt"))
-    model = FC(31, 2, 256, 0.2)
-    model.load_state_dict(torch.load("../ckpt/fc_model.pth", weights_only=False)['state_dict'])
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    rd_matrices, ranges, velocities = process_batch(batch_file, model, device)
-    for i in range(min(50, len(rd_matrices))):
-        visualize_rd_matrix(rd_matrices[i], ranges[i], velocities[i], batch, label, i)
+    save_dir = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/processed_data"
+    point_files = glob.glob(os.path.join(data_root, "点迹", "PointTracks_*.txt"))
+    for point_file in tqdm(point_files, desc="处理异常数据"):
+        re_result = re.match(r"PointTracks_(\d+)_(\d+)_(\d+).txt", os.path.basename(point_file))
+        batch_id = re_result.group(1)
+        label = re_result.group(2)
+        num_points = re_result.group(3)
+        track_file = os.path.join(data_root, "航迹", f"Tracks_{batch_id}_{label}_{num_points}.txt")
+        preprocessor = TrajectoryDataProcessor(point_file_path=point_file, track_file_path=track_file)
+        preprocessor.save_processed_data(output_dir=save_dir)

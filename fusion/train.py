@@ -11,7 +11,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 import multiprocessing
 
-from utils import config, dataset, visualize
+from utils import config, visualize
+from fusion.data import dataset
 from utils.logger import Logger
 
 
