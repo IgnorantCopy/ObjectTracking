@@ -2,6 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.figure_factory as ff
+import plotly.express as px
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -101,3 +103,79 @@ def plot_3d_trajectory(point_file, save_path=None):
         plt.close()
     else:
         plt.show()
+
+
+def plot_confusion_matrix(conf_matrix: np.ndarray, class_names=None, title='Confusion Matrix',
+                          normalize=False, width=800, height=600):
+    # 如果需要归一化
+    if normalize:
+        conf_matrix = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix = np.round(conf_matrix * 100, 2)  # 转换为百分比并保留两位小数
+        z_text = [[f'{val}%' for val in row] for row in conf_matrix]
+        title = title + ' (Normalized, %)'
+    else:
+        z_text = [[f'{val}' for val in row] for row in conf_matrix]
+
+    # 如果没有提供类别名称，则使用数字作为标签
+    if class_names is None:
+        class_names = [str(i) for i in range(conf_matrix.shape[0])]
+
+    # 创建热力图数据
+    fig = ff.create_annotated_heatmap(
+        z=conf_matrix,
+        x=class_names,
+        y=class_names,
+        annotation_text=z_text,
+        colorscale=px.colors.sequential.Blues,
+        showscale=True,
+        hoverinfo='z'
+    )
+
+    # 更新布局
+    fig.update_layout(
+        title=dict(
+            text=title,
+            font=dict(size=20),
+            y=0.95,
+            x=0.5,
+            xanchor='center',
+            yanchor='top'
+        ),
+        xaxis=dict(
+            title=dict(text='Predicted Labels', font=dict(size=16)),
+            tickfont=dict(size=12)
+        ),
+        yaxis=dict(
+            title=dict(text='True Labels', font=dict(size=16)),
+            tickfont=dict(size=12)
+        ),
+        width=width,
+        height=height,
+        margin=dict(l=80, r=80, t=100, b=80)
+    )
+
+    # 添加悬停信息
+    fig.update_traces(
+        hovertemplate='True: %{y}<br>Predicted: %{x}<br>Value: %{z}<extra></extra>'
+    )
+
+    return fig
+
+
+# 示例用法
+if __name__ == "__main__":
+    # 生成示例数据
+    class_names = ['轻型旋翼无人机', '小型旋翼无人机', '鸟类', '空飘球']
+    conf_matrix = np.array([
+        [189, 19, 34, 0],
+        [18, 176, 34, 2],
+        [48, 27, 165, 9],
+        [10, 58, 39, 268]
+    ])
+    # 绘制非归一化混淆矩阵
+    fig = plot_confusion_matrix(
+        conf_matrix=conf_matrix.T,
+        class_names=class_names,
+        title='Confusion Matrix (Counts)'
+    )
+    fig.show()

@@ -1,6 +1,5 @@
 import os
 
-import torch
 import yaml
 import torch.nn as nn
 import torch.optim as optim
@@ -22,28 +21,29 @@ def check_paths(*paths):
 def get_config(config_path: str):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    return config["rd_model"], config["track_model"], config['fc_model'], config["data"], config["train"]
+    return config["rd_model"], config["track_model"], config["data"], config["train"]
 
 
 def get_model(rd_model_config, track_model_config, channels, num_classes):
     if rd_model_config['name'] == "SwinTransformer":
         from fusion.models.swin import SwinTransformer3D
-        patch_depth   = rd_model_config["patch_depth"]
-        patch_height  = rd_model_config["patch_height"]
-        patch_width   = rd_model_config["patch_width"]
-        embed_dim     = rd_model_config["embed_dim"]
-        depths        = rd_model_config["depths"]
-        heads         = rd_model_config["heads"]
-        window_depth  = rd_model_config["window_depth"]
-        window_height = rd_model_config["window_height"]
-        window_width  = rd_model_config["window_width"]
-        ff_ratio      = rd_model_config["ff_ratio"]
-        qkv_bias      = rd_model_config["qkv_bias"]
-        dropout       = rd_model_config["dropout"]
-        attn_dropout  = rd_model_config["attn_dropout"]
-        dropout_path  = rd_model_config["dropout_path"]
-        patch_norm    = rd_model_config["patch_norm"]
-        frozen_stages = rd_model_config["frozen_stages"]
+        patch_depth        = rd_model_config["patch_depth"]
+        patch_height       = rd_model_config["patch_height"]
+        patch_width        = rd_model_config["patch_width"]
+        embed_dim          = rd_model_config["embed_dim"]
+        depths             = rd_model_config["depths"]
+        heads              = rd_model_config["heads"]
+        window_depth       = rd_model_config["window_depth"]
+        window_height      = rd_model_config["window_height"]
+        window_width       = rd_model_config["window_width"]
+        ff_ratio           = rd_model_config["ff_ratio"]
+        qkv_bias           = rd_model_config["qkv_bias"]
+        dropout            = rd_model_config["dropout"]
+        attn_dropout       = rd_model_config["attn_dropout"]
+        dropout_path       = rd_model_config["dropout_path"]
+        patch_norm         = rd_model_config["patch_norm"]
+        frozen_stages      = rd_model_config["frozen_stages"]
+        extra_features_dim = rd_model_config["extra_features_dim"]
         norm          = rd_model_config["norm"]
         if norm == "LayerNorm":
             norm = nn.LayerNorm
@@ -69,23 +69,7 @@ def get_model(rd_model_config, track_model_config, channels, num_classes):
     else:
         raise NotImplementedError(f"Track Model {track_model_config['name']} not implemented")
 
-    return FusedModel(rd_model, track_model, num_classes)
-
-
-def get_fc_model(fc_model_config, num_classes):
-    if fc_model_config:
-        from fusion.models.fc import FC
-
-        input_dim = fc_model_config["input_dim"]
-        hidden_dim = fc_model_config["hidden_dim"]
-        dropout = fc_model_config["dropout"]
-        pretrained = fc_model_config["pretrained"]
-        model = FC(input_dim=input_dim, output_dim=num_classes, hidden_dim=hidden_dim, dropout=dropout)
-        model.load_state_dict(torch.load(pretrained, weights_only=False)['state_dict'])
-    else:
-        raise ValueError("FC model config is None")
-
-    return model
+    return FusedModel(rd_model, track_model, num_classes, extra_features_dim)
 
 
 def get_optimizer(config, model, lr):

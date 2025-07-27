@@ -4,16 +4,16 @@ from thop import profile
 
 
 class FusedModel(nn.Module):
-    def __init__(self, rd_model, track_model, num_classes):
+    def __init__(self, rd_model, track_model, num_classes, extra_features_dim=0):
         super().__init__()
         self.swin_transformer = rd_model
         self.roformer = track_model
-        self.head = nn.Linear(self.swin_transformer.num_features + self.roformer.d_model, num_classes)
+        self.head = nn.Linear(self.swin_transformer.num_features + self.roformer.d_model + extra_features_dim, num_classes)
         self.softmax = nn.Softmax(dim=1)
 
-    def forward(self, track_features, images, track_mask=None, image_mask=None):
+    def forward(self, track_features, images, extra_features=None, track_mask=None, image_mask=None):
         track_features = self.roformer(track_features, track_mask)
-        image_features = self.swin_transformer(images, image_mask)
+        image_features = self.swin_transformer(images, extra_features, image_mask)
         features = torch.cat([track_features, image_features], dim=1)
         return self.softmax(self.head(features))
 

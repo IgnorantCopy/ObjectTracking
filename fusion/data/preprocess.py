@@ -4,6 +4,7 @@ import glob
 import struct
 import numpy as np
 import pandas as pd
+import polars as pl
 from scipy import signal, interpolate
 from scipy.fft import fft, fftshift
 from scipy.stats import zscore
@@ -234,17 +235,16 @@ def read_raw_data(fid):
         return None, None
 
 
-def cfar_detector_2d(rd_matrix, velocity_axis,
-                     detection_area_rows, detection_area_cols,
+def cfar_detector_2d(rd_matrix, cfar_threshold_factor,
+                     detection_rows, detection_cols,
                      num_guard_cells_range, num_training_cells_range,
-                     num_guard_cells_doppler, num_training_cells_doppler,
-                     cfar_threshold_factor):
+                     num_guard_cells_doppler, num_training_cells_doppler):
     """
     对RD矩阵执行2D-CFAR检测
 
     :param rd_matrix: 输入的 RD 矩阵 (linear)
-    :param detection_area_rows: 距离维检测区域行索引范围
-    :param detection_area_cols: 多普勒维检测区域列索引范围
+    :param detection_rows: 距离维检测区域行索引范围
+    :param detection_cols: 多普勒维检测区域列索引范围
     :param num_guard_cells_range: 距离维保护单元数 (单侧)
     :param num_training_cells_range: 距离维训练单元数 (单侧) - 这里会被忽略
     :param num_guard_cells_doppler: 多普勒维保护单元数 (单侧)
@@ -258,171 +258,144 @@ def cfar_detector_2d(rd_matrix, velocity_axis,
 
     rows, cols = rd_matrix.shape
 
-    target_detected, target_row, target_col = func_ca_cfar_detect(
-        rd_matrix,
-        detection_area_rows,
-        detection_area_cols,
-        num_guard_cells_range,  # Gr
-        num_guard_cells_doppler,  # Gd
-        num_training_cells_doppler,  # Td
-        cfar_threshold_factor  # 转换为线性域阈值因子
-    )
+    zero_vel_idx = cols // 2
 
-    if target_detected and abs(velocity_axis[target_col]) > 56:
-        target_detected = False
+    # 排除零速度附近的杂波区域
+    clutter_width = 3
+    non_clutter_mask = np.ones(cols, dtype=bool)
+    non_clutter_mask[max(0, zero_vel_idx - clutter_width):min(cols, zero_vel_idx + clutter_width + 1)] = False
 
-    if target_detected:
-        # 生成十字掩码（保持原有逻辑）
-        mask = np.zeros_like(rd_matrix)
-
-        # 垂直部分: 目标列及左右各1列
-        v_start_col = max(0, target_col - 1)
-        v_end_col = min(cols, target_col + 2)
-        mask[:, v_start_col:v_end_col] = 1
-
-        # 水平部分: 目标行及上下各4行, 目标列左右各10列
-        h_start_row = max(0, target_row - 4)
-        h_end_row = min(rows, target_row + 5)
-        h_start_col = max(0, target_col - 10)
-        h_end_col = min(cols, target_col + 11)
-        mask[h_start_row:h_end_row, h_start_col:h_end_col] = 1
-
-        return rd_matrix * mask
-    else:
+    if not np.any(non_clutter_mask):
+        print("  -> 返回None: 无有效检测区域")
         return None
 
-
-def func_ca_cfar_detect(data_amplitude, detection_rows, detection_cols, Gr, Gd, Td, threshold_factor):
-    """
-    实现改进的CA-CFAR检测功能 - 多普勒向使用较小平均值的一侧
-
-    :param data_amplitude: RD图的幅度数据（线性域）
-    :param detection_rows: 需要检测的距离单元索引范围
-    :param detection_cols: 需要检测的多普勒单元索引范围
-    :param Gr: 距离向保护单元数
-    :param Gd: 多普勒向保护单元数
-    :param Td: 多普勒向参考单元数 (左右各Td)
-    :param threshold_factor: 阈值因子（线性域）
-    :return: (target_detected, target_row, target_col)
-    """
-
-    num_rows, num_cols = data_amplitude.shape
-    target_detected = False
-    target_row = np.nan
-    target_col = np.nan
-
-    # 确保索引在有效范围内
-    if len(detection_rows) == 0 or len(detection_cols) == 0:
-        return target_detected, target_row, target_col
-    if detection_rows[0] < 0 or detection_rows[-1] >= num_rows or detection_cols[0] < 0 or detection_cols[-1] >= num_cols:
-        return target_detected, target_row, target_col
-
-    # 提取检测区域的数据
-    detection_area_data = data_amplitude[np.ix_(detection_rows, detection_cols)]
-
-    # 获取检测区域内所有点的索引，并按幅度降序排列
-    flat_indices = np.argsort(detection_area_data.ravel())[::-1]  # 降序
-    rows_in_detection_area, cols_in_detection_area = np.unravel_index(
-        flat_indices, detection_area_data.shape
+    # 调用修正的CFAR检测
+    target_detected, target_mask, target_row, target_col = func_ca_cfar_detect_all_targets_new(
+        rd_matrix,
+        detection_rows,
+        detection_cols,
+        num_guard_cells_range,
+        num_guard_cells_doppler,
+        num_training_cells_range,
+        num_training_cells_doppler,
+        cfar_threshold_factor
     )
 
-    # 遍历检测区域内每一个点，从幅度最高的点开始
-    for k in range(len(flat_indices)):
-        current_row_in_detection_area = rows_in_detection_area[k]
-        current_col_in_detection_area = cols_in_detection_area[k]
+    if target_detected:
+        result = rd_matrix * target_mask.astype(float)
+        return result, target_row, target_col
+    else:
+        return None, None, None
 
-        # 将检测区域内的坐标转换为全局RD图的坐标
-        i = detection_rows[current_row_in_detection_area]
-        j = detection_cols[current_col_in_detection_area]
 
-        # 确保当前点在有效的检测区域内
-        if i < 0 or i >= num_rows or j < 0 or j >= num_cols:
+def func_ca_cfar_detect_all_targets_new(data_power, detection_rows, detection_cols,
+                                        Gr, Gd, Tr, Td, threshold_factor):
+    """
+    严格按照MATLAB版本实现的CA-CFAR检测
+    """
+    num_rows, num_cols = data_power.shape
+
+    # 初始化
+    local_detection_area = data_power[np.ix_(detection_rows, detection_cols)]
+    local_num_rows, local_num_cols = local_detection_area.shape
+    status_map = np.zeros((local_num_rows, local_num_cols), dtype=int)
+    output_mask = np.zeros_like(data_power, dtype=bool)
+
+    # 按幅度降序排序
+    sorted_indices = np.argsort(local_detection_area.ravel())[::-1]
+    rows_in_local, cols_in_local = np.unravel_index(sorted_indices, local_detection_area.shape)
+
+    for k in range(len(sorted_indices)):
+        local_row = rows_in_local[k]
+        local_col = cols_in_local[k]
+
+        if status_map[local_row, local_col] != 0:
             continue
 
-        # 计算距离向参考单元的索引（保持原有逻辑）
-        range_ref_indices_before = np.arange(0, max(0, i - Gr))
-        range_ref_indices_after = np.arange(min(num_rows, i + Gr + 1), num_rows)
-        range_ref_indices = np.concatenate([range_ref_indices_before, range_ref_indices_after])
+        # 转换为全局坐标
+        i = detection_rows[local_row]
+        j = detection_cols[local_col]
+        cut_power = data_power[i, j]
 
-        # === 新的多普勒向参考单元选择逻辑 ===
-        # 分别计算左侧和右侧的多普勒参考单元
-        doppler_ref_indices_left = np.arange(
-            max(0, j - Gd - Td),
-            max(0, j - Gd)
-        )
-        doppler_ref_indices_right = np.arange(
-            min(num_cols, j + Gd + 1),
-            min(num_cols, j + Gd + Td + 1)
-        )
+        is_target = True
 
-        # 计算左右两侧的平均噪声功率
-        left_noise_sum = 0
-        left_noise_count = 0
-        right_noise_sum = 0
-        right_noise_count = 0
+        # 距离向上方参考单元
+        sum_noise_upper, count_noise_upper = 0, 0
+        for r_ref in range(i - Gr - Td * 2, i - Gr):
+            if 0 <= r_ref < num_rows:
+                # 检查是否在检测区域内且已被处理
+                if detection_rows[0] <= r_ref <= detection_rows[-1]:
+                    local_r = r_ref - detection_rows[0]
+                    if status_map[local_r, local_col] in [1, 2]:
+                        continue
+                sum_noise_upper += data_power[r_ref, j]
+                count_noise_upper += 1
 
-        # 左侧平均值
-        if len(doppler_ref_indices_left) > 0:
-            left_noise_sum = np.sum(data_amplitude[i, doppler_ref_indices_left])
-            left_noise_count = len(doppler_ref_indices_left)
+        if count_noise_upper == 0 or cut_power <= threshold_factor * (sum_noise_upper / count_noise_upper):
+            is_target = False
 
-        # 右侧平均值
-        if len(doppler_ref_indices_right) > 0:
-            right_noise_sum = np.sum(data_amplitude[i, doppler_ref_indices_right])
-            right_noise_count = len(doppler_ref_indices_right)
+        if not is_target:
+            status_map[local_row, local_col] = 2
+            continue
 
-        # 选择平均值较小的一侧
-        if left_noise_count > 0 and right_noise_count > 0:
-            # 两侧都有数据，选择平均值较小的一侧
-            left_avg = left_noise_sum / left_noise_count
-            right_avg = right_noise_sum / right_noise_count
+        # 距离向下方参考单元
+        sum_noise_lower, count_noise_lower = 0, 0
+        for r_ref in range(i + Gr + 1, i + Gr + Td * 2 + 1):
+            if 0 <= r_ref < num_rows:
+                if detection_rows[0] <= r_ref <= detection_rows[-1]:
+                    local_r = r_ref - detection_rows[0]
+                    if status_map[local_r, local_col] in [1, 2]:
+                        continue
+                sum_noise_lower += data_power[r_ref, j]
+                count_noise_lower += 1
 
-            if left_avg <= right_avg:
-                doppler_noise_sum = left_noise_sum
-                doppler_noise_count = left_noise_count
-            else:
-                doppler_noise_sum = right_noise_sum
-                doppler_noise_count = right_noise_count
-        elif left_noise_count > 0:
-            # 只有左侧有数据
-            doppler_noise_sum = left_noise_sum
-            doppler_noise_count = left_noise_count
-        elif right_noise_count > 0:
-            # 只有右侧有数据
-            doppler_noise_sum = right_noise_sum
-            doppler_noise_count = right_noise_count
+        if count_noise_lower == 0 or cut_power <= threshold_factor * (sum_noise_lower / count_noise_lower):
+            is_target = False
+
+        if not is_target:
+            status_map[local_row, local_col] = 2
+            continue
+
+        # 多普勒向参考单元（左右取较小值）
+        sum_noise_left, count_noise_left = 0, 0
+        for d_ref in range(j - Gd - Td, j - Gd):
+            if 0 <= d_ref < num_cols:
+                if detection_cols[0] <= d_ref <= detection_cols[-1]:
+                    local_d = d_ref - detection_cols[0]
+                    if status_map[local_row, local_d] in [1, 2]:
+                        continue
+                sum_noise_left += data_power[i, d_ref]
+                count_noise_left += 1
+
+        sum_noise_right, count_noise_right = 0, 0
+        for d_ref in range(j + Gd + 1, j + Gd + Td + 1):
+            if 0 <= d_ref < num_cols:
+                if detection_cols[0] <= d_ref <= detection_cols[-1]:
+                    local_d = d_ref - detection_cols[0]
+                    if status_map[local_row, local_d] in [1, 2]:
+                        continue
+                sum_noise_right += data_power[i, d_ref]
+                count_noise_right += 1
+
+        # 取左右两侧噪声估计的较小值
+        noise_avg_left = sum_noise_left / count_noise_left if count_noise_left > 0 else float('inf')
+        noise_avg_right = sum_noise_right / count_noise_right if count_noise_right > 0 else float('inf')
+        noise_avg_doppler = min(noise_avg_left, noise_avg_right)
+
+        if np.isinf(noise_avg_doppler) or cut_power <= threshold_factor * noise_avg_doppler:
+            is_target = False
+
+        # 最终判定
+        if is_target:
+            status_map[local_row, local_col] = 1
+            output_mask[i, j] = True
         else:
-            # 两侧都没有数据，跳过此点
-            continue
+            status_map[local_row, local_col] = 2
 
-        # 计算距离向参考单元的噪声贡献
-        range_noise_sum = 0
-        range_noise_count = 0
-        if len(range_ref_indices) > 0:
-            range_noise_sum = np.sum(data_amplitude[range_ref_indices, j])
-            range_noise_count = len(range_ref_indices)
-
-        # 计算总的平均噪声功率
-        total_noise_sum = range_noise_sum + doppler_noise_sum
-        total_noise_count = range_noise_count + doppler_noise_count
-
-        if total_noise_count == 0:
-            continue  # 避免除以零
-
-        noise_average = total_noise_sum / total_noise_count
-        threshold = threshold_factor * noise_average
-
-        # 比较当前点与阈值
-        if data_amplitude[i, j] > threshold:
-            target_detected = True
-            target_row = i
-            target_col = j
-            return target_detected, target_row, target_col
-
-    return target_detected, target_row, target_col
+    return np.any(output_mask), output_mask, i, j
 
 
-def process_batch(batch: BatchFile, model, device):
+def process_batch(batch: BatchFile):
     """处理单个批次的数据"""
     # 打开原始数据文件
     frame_count = 0
@@ -549,45 +522,38 @@ def process_batch(batch: BatchFile, model, device):
             # 保存MTD处理结果
             rd_matrix = mtd_result
             range_axis = range_plot
-            velocity_axis = v_axis
+            velocity_axis = v_axis.reshape(-1)
             rd_matrix = np.abs(rd_matrix)
-            velocity_index = np.where(np.reshape(velocity_axis, -1) == 0)[0][0]
-            rd_matrix[:, velocity_index] = 0
-            temp_rd_matrix = rd_matrix.copy()
-            temp_rd_matrix[:, velocity_index - 1:velocity_index + 2] = 0
+
+            velocity_index = np.where(velocity_axis == 0)[0][0]
+            point_df = pl.read_csv(batch.point_file, has_header=True, separator=",", encoding="gbk")
+            index = min(params.track_no_info[1], len(point_df))
+            doppler_velocity = point_df["多普勒速度"][int(index) - 1]
+            if abs(doppler_velocity) > 5:
+                rd_matrix[:, velocity_index - 1:velocity_index + 2] = 0
+
             # 2D-CFAR 检测和掩码生成
-            processed_rd = cfar_detector_2d(
-                rd_matrix=temp_rd_matrix,
-                velocity_axis=velocity_axis.reshape(-1),
-                detection_area_rows=np.arange(range_start_local, range_end_local),
-                detection_area_cols=np.arange(doppler_start, doppler_end),
-                num_guard_cells_range=2,
-                num_training_cells_range=4,
+            processed_rd, target_row, target_col = cfar_detector_2d(
+                rd_matrix=rd_matrix,
+                detection_rows=np.arange(range_start_local, range_end_local),
+                detection_cols=np.arange(doppler_start, doppler_end),
+                num_guard_cells_range=3,
+                num_training_cells_range=5,
                 num_guard_cells_doppler=2,
                 num_training_cells_doppler=4,
-                cfar_threshold_factor=6.5
+                cfar_threshold_factor=5
             )
 
             if processed_rd is None:
-                processed_rd = cfar_detector_2d(
-                    rd_matrix=rd_matrix,
-                    velocity_axis=velocity_axis.reshape(-1),
-                    detection_area_rows=np.arange(range_start_local, range_end_local),
-                    detection_area_cols=np.arange(doppler_start, doppler_end),
-                    num_guard_cells_range=2,
-                    num_training_cells_range=4,
-                    num_guard_cells_doppler=2,
-                    num_training_cells_doppler=4,
-                    cfar_threshold_factor=6.5
-                )
-                if processed_rd is None:
-                    print(f"帧 {frame_count} 未找到目标，跳过该帧")
-                    continue  # 未找到目标，跳过此帧
-            else:
-                rd_matrix = temp_rd_matrix
+                print(f"帧 {frame_count} 未找到目标，跳过该帧")
+                continue  # 未找到目标，跳过此帧
+
+            rd_matrix = processed_rd
+
+            # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
             velocity_mask = np.abs(velocity_axis) < 56
             velocity_axis = velocity_axis[velocity_mask]
-            rd_matrix = rd_matrix[:, np.reshape(velocity_mask, -1)]
+            rd_matrix = rd_matrix[:, velocity_mask]
             rd_matrix = np.clip(rd_matrix, 1, 1e10)
             rd_matrix = 20 * np.log10(rd_matrix)
 
@@ -980,7 +946,8 @@ class TrajectoryDataProcessor(object):
                     combined_outliers = velocity_outliers | zscore_outliers
 
                     if combined_outliers.sum() > 0:
-                        print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个{col}异常值")
+                        if self.verbose:
+                            print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个{col}异常值")
                         corrected_velocity = self._interpolate_outliers(velocity_series, combined_outliers)
                         processed_data.loc[batch_mask, col] = corrected_velocity.values
 
@@ -990,7 +957,8 @@ class TrajectoryDataProcessor(object):
                     series = batch_data[col]
                     outliers = self._detect_outliers_zscore(series)
                     if outliers.sum() > 0:
-                        print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
+                        if self.verbose:
+                            print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
                         # corrected_series = self._interpolate_outliers(series, outliers)
                         corrected_series = self._extrapolate_outliers(series, outliers)
                         processed_data.loc[batch_mask, col] = corrected_series.values
@@ -1021,6 +989,7 @@ class TrajectoryDataProcessor(object):
 
 if __name__ == '__main__':
     import plotly.graph_objects as go
+    from math import log10
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
     save_dir = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/processed_data"
@@ -1038,14 +1007,17 @@ if __name__ == '__main__':
         result = preprocessor.get_processed_data()
         point_df = result['point_data']
         for i in range(len(point_df)):
-            doppler = point_df['多普勒速度'][i]
-            dopplers[label].append(doppler)
+            try:
+                doppler = log10(point_df['信噪比'][i])
+                dopplers[label].append(doppler)
+            except Exception as e:
+                print(f"{point_file} 中信噪比异常: {point_df['时间'][i]}")
     for k, v in dopplers.items():
         fig = go.Figure(data=[go.Histogram(x=v, histnorm='probability', nbinsx=30)])
         fig.update_layout(
-            title_text="Delta Distribution",
-            xaxis_title_text="Delta",
-            yaxis_title_text="Probability",
+            title_text="信噪比分布",
+            xaxis_title_text="信噪比 (对数坐标)",
+            yaxis_title_text="占比",
             bargap=0.2,
             bargroupgap=0.1
         )

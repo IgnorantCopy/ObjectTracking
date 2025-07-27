@@ -39,7 +39,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
     conf_mat = np.zeros((num_classes, num_classes))
     train_max_begin_time = 0
     train_avg_rate = 0.
-    for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
+    for i, (_, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
             in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
         image = image.to(device)
         track_features = track_features.to(device)
@@ -64,7 +64,17 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
 
             track_mask_t = track_mask_t.to(device)
             image_mask_t = image_mask_t.to(device)
-            output_t = model(track_features, image, track_mask_t, image_mask_t)
+
+            extra_features_t = []
+            for j, mask in enumerate(image_mask_t):
+                rd_t = mask.float().sum().int()
+                if rd_t == 0:
+                    extra_features_t.append(torch.tensor([0. for _ in range(extra_features.shape[2])]))
+                else:
+                    extra_features_t.append(extra_features[j][:rd_t].mean(0))
+            extra_features_t = torch.stack(extra_features_t).float().to(device)
+
+            output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
             output_max_t, pred_t = output_t.max(1)
             pred_copy = pred_t.clone()
             pred_copy[output_max_t < threshold] = -1
@@ -84,6 +94,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
             torch.cuda.empty_cache()
 
         cls_loss /= track_seq_len
+        print(cls_loss.item())
         begin_times = torch.tensor(begin_times, dtype=torch.float, device=device)
         train_max_begin_time = max(train_max_begin_time, begin_times.max().item())
         time_loss = nn.MSELoss()(begin_times, torch.zeros_like(begin_times))
@@ -127,7 +138,7 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
     val_max_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
-        for i, (_, point_index, image, track_features, image_mask, track_mask, label) \
+        for i, (_, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
             image = image.to(device)
             track_features = track_features.to(device)
@@ -151,7 +162,17 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
 
                 track_mask_t = track_mask_t.to(device)
                 image_mask_t = image_mask_t.to(device)
-                output_t = model(track_features, image, track_mask_t, image_mask_t)
+
+                extra_features_t = []
+                for j, mask in enumerate(image_mask_t):
+                    rd_t = mask.float().sum().int()
+                    if rd_t == 0:
+                        extra_features_t.append(torch.tensor([0. for _ in range(extra_features.shape[2])]))
+                    else:
+                        extra_features_t.append(extra_features[j][:rd_t].mean(0))
+                extra_features_t = torch.stack(extra_features_t).float().to(device)
+
+                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -201,12 +222,12 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
     return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, conf_mat
 
 
-def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn):
+def test(model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn):
     logger.log("Start test on train set...")
     model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
     model.eval()
     with (torch.no_grad()):
-        for i, (batch_files, point_index, image, track_features, image_mask, track_mask, label) \
+        for i, (batch_files, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
                 in tqdm(enumerate(train_loader), total=len(train_loader), desc="Test on train set"):
             image = image.to(device)
             track_features = track_features.to(device)
@@ -216,19 +237,29 @@ def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq
             else:
                 image = image.float()
                 track_features = track_features.float()
-            image_mask = image_mask.to(device)
-            track_mask = track_mask.to(device)
             label = label.to(device)
 
             pred = []
             begin = [False for _ in range(len(image))]
             for t in range(track_seq_len):
-                index_mask_t = (point_index <= t + 1).to(device)
-                image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                track_features_t = track_features[:, :, :t+1, :]
+                index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
-                track_mask_t = track_mask[:, :t+1]
-                output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
+                track_mask_t = track_mask.clone()
+                track_mask_t[:, t+1:] = 0
+
+                track_mask_t = track_mask_t.to(device)
+                image_mask_t = image_mask_t.to(device)
+
+                extra_features_t = []
+                for j, mask in enumerate(image_mask_t):
+                    rd_t = mask.float().sum().int()
+                    if rd_t == 0:
+                        extra_features_t.append(torch.tensor([0. for _ in range(extra_features.shape[2])]))
+                    else:
+                        extra_features_t.append(extra_features[j][:rd_t].mean(0))
+                extra_features_t = torch.stack(extra_features_t).float().to(device)
+
+                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -247,7 +278,7 @@ def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file, fc_model, device)
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
                 batch_image_mask = image_mask[batch].cpu().numpy()
                 if len(rd_matrices) > len(batch_image_mask):
                     rd_matrices = rd_matrices[:len(batch_image_mask)]
@@ -283,7 +314,7 @@ def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq
 
     logger.log("Start test on val set...")
     with torch.no_grad():
-        for i, (batch_files, point_index, image, track_features, image_mask, track_mask, label) \
+        for i, (batch_files, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Test on val set"):
             image = image.to(device)
             track_features = track_features.to(device)
@@ -293,19 +324,25 @@ def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq
             else:
                 image = image.float()
                 track_features = track_features.float()
-            image_mask = image_mask.to(device)
-            track_mask = track_mask.to(device)
             label = label.to(device)
 
             pred = []
             begin = [False for _ in range(len(image))]
             for t in tqdm(range(track_seq_len)):
-                index_mask_t = (point_index <= t + 1).to(device)
-                image_t = image * index_mask_t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-                track_features_t = track_features[:, :, :t+1, :]
+                index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
-                track_mask_t = track_mask[:, :t+1]
-                output_t = model(track_features_t, image_t, track_mask_t, image_mask_t)
+                track_mask_t = track_mask.clone()
+                track_mask_t[:, t+1:] = 0
+
+                track_mask_t = track_mask_t.to(device)
+                image_mask_t = image_mask_t.to(device)
+
+                extra_features_t = []
+                for j, mask in enumerate(image_mask_t):
+                    extra_features_t.append(extra_features[j][:mask.float().sum().int()].mean(0))
+                extra_features_t = torch.stack(extra_features_t).float().to(device)
+
+                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -324,7 +361,7 @@ def test(model, fc_model, train_loader, val_loader, device, threshold, track_seq
             label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file, fc_model, device)
+                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
                 batch_image_mask = image_mask[batch].cpu().numpy()
                 if len(rd_matrices) > len(batch_image_mask):
                     rd_matrices = rd_matrices[:len(batch_image_mask)]
@@ -383,7 +420,7 @@ def main():
     config.check_paths(log_path)
     writer = SummaryWriter(log_dir=log_path)
     logger = Logger(os.path.join(log_path, "train.txt"))
-    rd_model_config, track_model_config, fc_model_config, data_config, train_config = config.get_config(config_path)
+    rd_model_config, track_model_config, data_config, train_config = config.get_config(config_path)
 
     use_flash_attn = rd_model_config['name'] in ['Vit', 'ViViT']
 
@@ -445,16 +482,11 @@ def main():
         model.half()
     model.to(device)
 
-    fc_model = config.get_fc_model(fc_model_config, num_classes=2)
-    fc_model.to(device)
-
     train_transform, val_transform = config.get_transform(channels, height, width)
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.FusedDataset(train_batch_files, fc_model, device,
-                                         image_transform=train_transform, image_seq_len=image_seq_len,
+    train_dataset = dataset.FusedDataset(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
                                          track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.FusedDataset(val_batch_files, fc_model, device,
-                                       image_transform=val_transform, image_seq_len=image_seq_len,
+    val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
                                        track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
@@ -507,7 +539,7 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, fc_model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn)
+        test(model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn)
 
     logger.close()
     writer.close()

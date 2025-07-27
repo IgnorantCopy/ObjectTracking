@@ -1,7 +1,7 @@
 import random
+
 import torch
 from torch.utils.data import Dataset
-import polars as pl
 
 from .preprocess import *
 
@@ -32,7 +32,7 @@ def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
 
 
 class FusedDataset(Dataset):
-    def __init__(self, batch_files: list[BatchFile], fc_model, device, image_transform=None, track_transform=None,
+    def __init__(self, batch_files: list[BatchFile], image_transform=None, track_transform=None,
                  image_seq_len=180, track_seq_len=29):
         super().__init__()
         self.batch_files = batch_files
@@ -40,8 +40,6 @@ class FusedDataset(Dataset):
         self.track_transform = track_transform
         self.image_seq_len = image_seq_len
         self.track_seq_len = track_seq_len
-        self.fc_model = fc_model
-        self.device = device
 
     def __len__(self):
         return len(self.batch_files)
@@ -54,9 +52,10 @@ class FusedDataset(Dataset):
         cls = batch_file.label - 1
 
         # load rd map
-        images, point_index = self._load_rd_map(batch_file, num_points)
+        images, point_index, extra_features = self._load_rd_map(batch_file, num_points)
         if len(images) == 0:
-            return batch_file, None, None, None, None, None, cls
+            print('error')
+            return batch_file, None, None, None, None, None, None, cls
 
         image_mask = np.ones((self.image_seq_len,), dtype=np.int32)
         if images.shape[0] < self.image_seq_len:
@@ -69,17 +68,23 @@ class FusedDataset(Dataset):
                 point_index,
                 np.array([point_index[-1] for _ in range(self.image_seq_len - point_index.shape[0])])
             ], axis=0)
+            extra_features = np.concatenate([
+                extra_features,
+                np.ones((self.image_seq_len - extra_features.shape[0], extra_features.shape[1])) * np.mean(extra_features)
+            ], axis=0)
         elif images.shape[0] > self.image_seq_len:
             quantiles = np.linspace(0, 1, self.image_seq_len)
             indices = np.floor(quantiles * (images.shape[0] - 1)).astype(int)
             images = images[indices]
             point_index = point_index[indices]
+            extra_features = extra_features[indices]
         assert images.shape[0] == self.image_seq_len, f"RD 图数量与预期不符: {images.shape[0]}, {self.image_seq_len}"
 
         # load point and track data
         merged_data = self._load_track_data(point_file, track_file)
         if len(merged_data) == 0:
-            return batch_file, None, None, None, None, None, cls
+            print('error')
+            return batch_file, None, None, None, None, None, None, cls
         if merged_data.dtype != np.float32:
             merged_data = merged_data.astype(np.float32)
         track_mask = np.ones((self.track_seq_len,), dtype=np.int32)
@@ -95,7 +100,7 @@ class FusedDataset(Dataset):
         if self.track_transform:
             merged_data = self.track_transform(merged_data)
 
-        return batch_file, point_index, images, merged_data, image_mask, track_mask, cls
+        return batch_file, point_index, images, merged_data, extra_features, image_mask, track_mask, cls
 
     def _load_rd_map(self, batch: BatchFile, num_points: int):
         """处理单个批次的数据"""
@@ -103,7 +108,10 @@ class FusedDataset(Dataset):
         frame_count = 0
         rd_matrices = []
         point_index = []
-        label = batch.label
+        # 额外特征
+        num_none_zero = []
+        num_none_zero_row = []
+
 
         with open(batch.raw_file, 'rb') as fid:
             while True:
@@ -234,20 +242,22 @@ class FusedDataset(Dataset):
                     rd_matrix[:, velocity_index-1:velocity_index+2] = 0
 
                 # 2D-CFAR 检测和掩码生成
-                processed_rd = cfar_detector_2d(
+                processed_rd, target_row, target_col = cfar_detector_2d(
                     rd_matrix=rd_matrix,
-                    velocity_axis=velocity_axis,
-                    detection_area_rows=np.arange(range_start_local, range_end_local),
-                    detection_area_cols=np.arange(doppler_start, doppler_end),
-                    num_guard_cells_range=2,
-                    num_training_cells_range=4,
+                    detection_rows=np.arange(range_start_local, range_end_local),
+                    detection_cols=np.arange(doppler_start, doppler_end),
+                    num_guard_cells_range=3,
+                    num_training_cells_range=5,
                     num_guard_cells_doppler=2,
                     num_training_cells_doppler=4,
-                    cfar_threshold_factor=6.5
+                    cfar_threshold_factor=5
                 )
 
                 if processed_rd is None:
                     continue  # 未找到目标，跳过此帧
+
+                num_none_zero.append(np.count_nonzero(processed_rd))
+                num_none_zero_row.append(np.count_nonzero(processed_rd[target_row-1:target_row+2, :]) / 3)
 
                 # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                 velocity_mask = np.abs(velocity_axis) < 56
@@ -265,7 +275,10 @@ class FusedDataset(Dataset):
         if rd_matrices:
             rd_matrices = np.stack(rd_matrices, axis=0)
             point_index = np.array(point_index, dtype=np.int32)
-        return rd_matrices, point_index
+        num_none_zero = np.array(num_none_zero, dtype=np.int32)
+        num_none_zero_row = np.array(num_none_zero_row, dtype=np.float32)
+        extra_features = np.stack([num_none_zero, num_none_zero_row], axis=1)
+        return rd_matrices, point_index, extra_features
 
     @staticmethod
     def _load_track_data(point_filepath, track_filepath):
@@ -336,40 +349,38 @@ class FusedDataset(Dataset):
 
 
 def collate_fn(batch):
-    batch_files, point_indices, stacked_images, stacked_tracks, image_masks, track_masks, labels = [], [], [], [], [], [], []
-    for (batch_file, point_index, images, merged_data, image_mask, track_mask, cls) in batch:
+    batch_files, point_indices, stacked_images, stacked_tracks, stacked_extra_features, image_masks, track_masks, labels = \
+        [], [], [], [], [], [], [], []
+    for (batch_file, point_index, images, merged_data, extra_features, image_mask, track_mask, cls) in batch:
         if images is None or merged_data is None:
             continue
         batch_files.append(batch_file)
         point_indices.append(point_index)
         stacked_images.append(images)
         stacked_tracks.append(merged_data)
+        stacked_extra_features.append(extra_features)
         image_masks.append(image_mask)
         track_masks.append(track_mask)
         labels.append(cls)
     point_indices = torch.from_numpy(np.stack(point_indices, axis=0))
     stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
     stacked_tracks = torch.from_numpy(np.stack(stacked_tracks, axis=0))
+    stacked_extra_features = torch.from_numpy(np.stack(stacked_extra_features, axis=0))
     image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
     track_masks = torch.from_numpy(np.stack(track_masks, axis=0))
     labels = torch.tensor(labels, dtype=torch.long)
-    return batch_files, point_indices, stacked_images, stacked_tracks, image_masks, track_masks, labels
+    return batch_files, point_indices, stacked_images, stacked_tracks, stacked_extra_features, image_masks, track_masks, labels
 
 
 if __name__ == '__main__':
     from fusion.utils.visualize import visualize_rd_matrix
-    from fusion.models.fc import FC
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    batch = 2975
-    label = 4
+    batch = 33
+    label = 1
     batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
                            os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_23.txt"),
                            os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_23.txt"))
-    model = FC(31, 2, 256, 0.2)
-    model.load_state_dict(torch.load("../ckpt/fc_model.pth", weights_only=False)['state_dict'])
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    rd_matrices, ranges, velocities = process_batch(batch_file, model, device)
+    rd_matrices, ranges, velocities = process_batch(batch_file)
     for i in range(min(50, len(rd_matrices))):
         visualize_rd_matrix(rd_matrices[i], ranges[i], velocities[i], batch, label, i)

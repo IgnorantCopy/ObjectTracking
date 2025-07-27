@@ -241,11 +241,13 @@ class BasicLayer(nn.Module):
                                    dropout_path=dropout_path[i] if isinstance(dropout_path, list) else dropout_path)
             for i in range(depth)
         ])
-
+        self.pool = nn.Conv2d(dim, dim * 2, kernel_size=2, stride=2)
         self.downsample = downsample(dim=dim, norm=norm) if downsample else None
 
     def forward(self, x, mask=None):
         b, c, d, h, w = x.shape
+        shortcut = rearrange(self.pool(rearrange(x, 'b c d h w -> (b d) c h w')), '(b d) c h w -> b c d h w', b=b) \
+                    if self.downsample else x
         window_size, shift_size = get_window_size((d, h, w), self.window_size, self.shift_size)
         w_d, w_h, w_w = window_size
         x = rearrange(x, 'b c d h w -> b d h w c')
@@ -266,7 +268,7 @@ class BasicLayer(nn.Module):
         if self.downsample:
             x = self.downsample(x)
         x = rearrange(x, 'b d h w c -> b c d h w')
-        return x
+        return x + shortcut
 
 
 class PatchEmbedding3D(nn.Module):
@@ -363,7 +365,7 @@ class SwinTransformer3D(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, extra_features=None, mask=None):
         x = self.patch_embedding(x)
         x = self.pos_dropout(x)
         for layer in self.layers:
@@ -373,6 +375,8 @@ class SwinTransformer3D(nn.Module):
         x = self.norm(x)
         x = rearrange(x, 'b d h w c -> b c (d h w)')
         x = self.avg_pool(x).flatten(1)
+        if extra_features is not None:
+            x = torch.cat([x, extra_features], dim=1)
         return x
 
     def train(self, mode=True):

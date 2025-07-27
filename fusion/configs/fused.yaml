@@ -17,6 +17,7 @@ rd_model:
   norm: LayerNorm
   patch_norm: True
   frozen_stages: -1
+  extra_features_dim: 2
 
 
 track_model:
@@ -26,13 +27,6 @@ track_model:
   heads: 8
   depth: 4
   dropout: 0.15
-
-
-fc_model:
-  input_dim: 31
-  hidden_dim: 256
-  dropout: 0.2
-  pretrained: ./ckpt/fc_model.pth
 
 
 data:
