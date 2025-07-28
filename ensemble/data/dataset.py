@@ -3,14 +3,15 @@ import torch
 from torch.utils.data import Dataset
 
 
-from .preprocess import *
+from rd_preprocess import *
 
 
 TOTAL_FEATURES_PER_TIMESTEP = 21
 ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
 
-def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
+def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True, seed=42):
+    np.random.seed(seed)
     label_nums = [0 for _ in range(num_classes)]
     batch_files_by_cls = [[] for _ in range(num_classes)]
     batch_files = get_batch_file_list(data_root)
@@ -312,13 +313,14 @@ if __name__ == '__main__':
         batch_file = BatchFile(batch_id, label, raw_file, point_file, track_file)
         rd_matrices, ranges, velocities, missing_rates = process_batch(batch_file)
         if rd_matrices is None or len(rd_matrices) == 0:
-            continue
-        missing[label-1].append(missing_rates[5])
+            missing[label-1].append(1)
+        else:
+            missing[label-1].append(missing_rates[-1])
     for k, v in missing.items():
         fig = go.Figure(data=[go.Histogram(x=v, histnorm='probability', nbinsx=30)])
         fig.update_layout(
-            title_text="缺失率（中位数）分布",
-            xaxis_title_text="缺失率（中位数）",
+            title_text="缺失率分布",
+            xaxis_title_text="缺失率",
             yaxis_title_text="占比",
             bargap=0.2,
             bargroupgap=0.1
