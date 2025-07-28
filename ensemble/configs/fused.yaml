@@ -1,0 +1,54 @@
+model:
+  name: SwinTransformer
+  patch_depth: 4
+  patch_height: 4
+  patch_width: 34
+  embed_dim: 96
+  depths: [ 2, 2 ]
+  heads: [ 3, 6 ]
+  window_depth: 4
+  window_height: 4
+  window_width: 8
+  ff_ratio: 4.0
+  qkv_bias: True
+  dropout: 0.2
+  attn_dropout: 0.2
+  dropout_path: 0.1
+  norm: LayerNorm
+  patch_norm: True
+  frozen_stages: -1
+  extra_features_dim: 3
+
+
+data:
+  data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集
+  val_ratio: 0.2
+  shuffle: True
+  image_seq_len: 64
+  track_seq_len: 20
+
+
+train:
+  batch_size: 8
+  num_workers: 4
+  num_epochs: 1
+  lr: 0.01
+  height: 32
+  width: 544
+  num_classes: 6
+  channels: 1
+  alpha: 0.5
+  threshold: 0.5
+  lr_scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+    min_lr: 0.000001
+  optimizer:
+    name: SGD
+    momentum: 0.9
+    weight_decay: 0.0005
+  loss:
+    name: FocalLoss
+    gamma: 2.0
+

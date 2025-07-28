@@ -12,7 +12,7 @@ from torchvision import transforms
 import multiprocessing
 
 from utils import config, visualize
-from fusion.data import dataset
+from data import dataset
 from utils.logger import Logger
 
 
@@ -39,16 +39,13 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
     conf_mat = np.zeros((num_classes, num_classes))
     train_max_begin_time = 0
     train_avg_rate = 0.
-    for i, (_, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
+    for i, (_, point_index, image, extra_features, missing_rate, image_mask, label) \
             in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
         image = image.to(device)
-        track_features = track_features.to(device)
         if use_flash_attn:
             image = image.half()
-            track_features = track_features.half()
         else:
             image = image.float()
-            track_features = track_features.float()
         label = label.to(device)
         optimizer.zero_grad()
 
@@ -59,10 +56,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
         for t in range(track_seq_len):
             index_mask_t = (point_index <= t + 1)
             image_mask_t = image_mask * index_mask_t
-            track_mask_t = track_mask.clone()
-            track_mask_t[:, t+1:] = 0
 
-            track_mask_t = track_mask_t.to(device)
             image_mask_t = image_mask_t.to(device)
 
             extra_features_t = []
@@ -73,8 +67,9 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
                 else:
                     extra_features_t.append(extra_features[j][:rd_t].mean(0))
             extra_features_t = torch.stack(extra_features_t).float().to(device)
+            missing_rate_t = missing_rate[:, t].float().to(device)
 
-            output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
+            output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
             output_max_t, pred_t = output_t.max(1)
             pred_copy = pred_t.clone()
             pred_copy[output_max_t < threshold] = -1
@@ -90,7 +85,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
             cls_loss_t = criterion(output_t, label)
             cls_loss += cls_loss_t
             # 释放显存
-            del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+            del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
             torch.cuda.empty_cache()
 
         cls_loss /= track_seq_len
@@ -137,16 +132,13 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
     val_max_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
-        for i, (_, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
+        for i, (_, point_index, image, extra_features, missing_rate, image_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
             image = image.to(device)
-            track_features = track_features.to(device)
             if use_flash_attn:
                 image = image.half()
-                track_features = track_features.half()
             else:
                 image = image.float()
-                track_features = track_features.float()
             label = label.to(device)
 
             cls_loss = 0.
@@ -156,10 +148,6 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
             for t in range(track_seq_len):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
-                track_mask_t = track_mask.clone()
-                track_mask_t[:, t+1:] = 0
-
-                track_mask_t = track_mask_t.to(device)
                 image_mask_t = image_mask_t.to(device)
 
                 extra_features_t = []
@@ -170,8 +158,9 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
                     else:
                         extra_features_t.append(extra_features[j][:rd_t].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
+                missing_rate_t = missing_rate[:, t].float().to(device)
 
-                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
+                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -187,7 +176,7 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
                 cls_loss_t = criterion(output_t, label)
                 cls_loss += cls_loss_t
                 # 释放显存
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
                 torch.cuda.empty_cache()
             cls_loss /= track_seq_len
             begin_times = torch.tensor(begin_times)
@@ -226,16 +215,13 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
     model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
     model.eval()
     with (torch.no_grad()):
-        for i, (batch_files, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
+        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
                 in tqdm(enumerate(train_loader), total=len(train_loader), desc="Test on train set"):
             image = image.to(device)
-            track_features = track_features.to(device)
             if use_flash_attn:
                 image = image.half()
-                track_features = track_features.half()
             else:
                 image = image.float()
-                track_features = track_features.float()
             label = label.to(device)
 
             pred = []
@@ -243,10 +229,6 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
             for t in range(track_seq_len):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
-                track_mask_t = track_mask.clone()
-                track_mask_t[:, t+1:] = 0
-
-                track_mask_t = track_mask_t.to(device)
                 image_mask_t = image_mask_t.to(device)
 
                 extra_features_t = []
@@ -257,8 +239,9 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
                     else:
                         extra_features_t.append(extra_features[j][:rd_t].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
+                missing_rate_t = missing_rate[:, t].float().to(device)
 
-                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
+                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -270,7 +253,7 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
                 torch.cuda.empty_cache()
 
             pred = np.array(pred).T   # [batch_size, seq_len]
@@ -313,16 +296,13 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
 
     logger.log("Start test on val set...")
     with torch.no_grad():
-        for i, (batch_files, point_index, image, track_features, extra_features, image_mask, track_mask, label) \
+        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Test on val set"):
             image = image.to(device)
-            track_features = track_features.to(device)
             if use_flash_attn:
                 image = image.half()
-                track_features = track_features.half()
             else:
                 image = image.float()
-                track_features = track_features.float()
             label = label.to(device)
 
             pred = []
@@ -330,18 +310,15 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
             for t in tqdm(range(track_seq_len)):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
-                track_mask_t = track_mask.clone()
-                track_mask_t[:, t+1:] = 0
-
-                track_mask_t = track_mask_t.to(device)
                 image_mask_t = image_mask_t.to(device)
 
                 extra_features_t = []
                 for j, mask in enumerate(image_mask_t):
                     extra_features_t.append(extra_features[j][:mask.float().sum().int()].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
+                missing_rate_t = missing_rate[:, t].float().to(device)
 
-                output_t = model(track_features, image, extra_features_t, track_mask_t, image_mask_t)
+                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
                 pred_copy = pred_t.clone()
                 pred_copy[output_max_t < threshold] = -1
@@ -353,7 +330,7 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
                         pred_copy[j] = pred_t[j]
                 pred.append(pred_copy.cpu().tolist())
 
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t, track_mask_t
+                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
                 torch.cuda.empty_cache()
 
             pred = np.array(pred).T   # [batch_size, seq_len]
@@ -419,9 +396,9 @@ def main():
     config.check_paths(log_path)
     writer = SummaryWriter(log_dir=log_path)
     logger = Logger(os.path.join(log_path, "train.txt"))
-    rd_model_config, track_model_config, data_config, train_config = config.get_config(config_path)
+    model_config, data_config, train_config = config.get_config(config_path)
 
-    use_flash_attn = rd_model_config['name'] in ['Vit', 'ViViT']
+    use_flash_attn = model_config['name'] in ['Vit', 'ViViT']
 
     data_root     = data_config['data_root']
     val_ratio     = data_config['val_ratio']
@@ -447,12 +424,12 @@ def main():
 
     if phase == "pretrain":
         num_classes -= 2    # exclude noise and unknown class
-        model = config.get_model(rd_model_config, track_model_config, channels, num_classes)
+        model = config.get_model(model_config, channels, num_classes)
     elif phase == "train":
         if not pretrain:
             raise ValueError("Pretrain model is not provided.")
         pretrain_checkpoint = torch.load(pretrain)
-        model = config.get_model(rd_model_config, track_model_config, channels, num_classes - 2)
+        model = config.get_model(model_config, channels, num_classes - 2)
         model.load_state_dict(pretrain_checkpoint['state_dict'])
         model.head = nn.Linear(model.head.in_features, num_classes)
     else:
@@ -482,10 +459,10 @@ def main():
 
     train_transform, val_transform = config.get_transform(channels, height, width)
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.FusedDataset(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
-                                         track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                       track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+    train_dataset = dataset.RDMap(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
+                                  track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+    val_dataset = dataset.RDMap(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
+                                track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
 

@@ -1,7 +1,7 @@
 import random
-
 import torch
 from torch.utils.data import Dataset
+
 
 from .preprocess import *
 
@@ -31,7 +31,7 @@ def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True):
     return train_batch_files, val_batch_files
 
 
-class FusedDataset(Dataset):
+class RDMap(Dataset):
     def __init__(self, batch_files: list[BatchFile], image_transform=None, track_transform=None,
                  image_seq_len=180, track_seq_len=29):
         super().__init__()
@@ -47,14 +47,13 @@ class FusedDataset(Dataset):
     def __getitem__(self, item):
         batch_file = self.batch_files[item]
         point_file = batch_file.point_file
-        track_file = batch_file.track_file
         num_points = int(os.path.basename(point_file).split('_')[-1].split('.')[0])
         cls = batch_file.label - 1
 
         # load rd map
-        images, point_index, extra_features = self._load_rd_map(batch_file, num_points)
+        images, point_index, extra_features, missing_rate = self._load_rd_map(batch_file, num_points)
         if len(images) == 0:
-            return batch_file, None, None, None, None, None, None, cls
+            return batch_file, None, None, None, None, None, cls
 
         image_mask = np.ones((self.image_seq_len,), dtype=np.int32)
         if images.shape[0] < self.image_seq_len:
@@ -71,35 +70,20 @@ class FusedDataset(Dataset):
                 extra_features,
                 np.ones((self.image_seq_len - extra_features.shape[0], extra_features.shape[1])) * np.mean(extra_features)
             ], axis=0)
+            missing_rate = np.concatenate([
+                missing_rate,
+                np.array([missing_rate[-1] for _ in range(self.image_seq_len - missing_rate.shape[0])])
+            ], axis=0)
         elif images.shape[0] > self.image_seq_len:
             quantiles = np.linspace(0, 1, self.image_seq_len)
             indices = np.floor(quantiles * (images.shape[0] - 1)).astype(int)
             images = images[indices]
             point_index = point_index[indices]
             extra_features = extra_features[indices]
+            missing_rate = missing_rate[indices]
         assert images.shape[0] == self.image_seq_len, f"RD 图数量与预期不符: {images.shape[0]}, {self.image_seq_len}"
 
-        # load point and track data
-        merged_data = self._load_track_data(point_file, track_file)
-        if len(merged_data) == 0:
-            print('error')
-            return batch_file, None, None, None, None, None, None, cls
-        if merged_data.dtype != np.float32:
-            merged_data = merged_data.astype(np.float32)
-        track_mask = np.ones((self.track_seq_len,), dtype=np.int32)
-        if merged_data.shape[0] < self.track_seq_len:
-            track_mask[merged_data.shape[0]:] = 0
-            merged_data = np.concatenate([
-                merged_data,
-                np.zeros((self.track_seq_len - merged_data.shape[0], TOTAL_FEATURES_PER_TIMESTEP))
-            ], axis=0)
-        elif merged_data.shape[0] > self.track_seq_len:
-            merged_data = merged_data[:self.track_seq_len]
-        assert merged_data.shape[0] == self.track_seq_len, f"点迹数量与预期不符: {merged_data.shape[0]}, {self.track_seq_len}"
-        if self.track_transform:
-            merged_data = self.track_transform(merged_data)
-
-        return batch_file, point_index, images, merged_data, extra_features, image_mask, track_mask, cls
+        return batch_file, point_index, images, extra_features, missing_rate, image_mask, cls
 
     def _load_rd_map(self, batch: BatchFile, num_points: int):
         """处理单个批次的数据"""
@@ -110,7 +94,9 @@ class FusedDataset(Dataset):
         # 额外特征
         num_none_zero = []
         num_none_zero_row = []
-
+        missing_rate = []
+        total = 0
+        detected = 0
 
         with open(batch.raw_file, 'rb') as fid:
             while True:
@@ -251,12 +237,14 @@ class FusedDataset(Dataset):
                     num_training_cells_doppler=4,
                     cfar_threshold_factor=5
                 )
-
+                total += 1
                 if processed_rd is None:
                     continue  # 未找到目标，跳过此帧
+                detected += 1
 
                 num_none_zero.append(np.count_nonzero(processed_rd))
                 num_none_zero_row.append(np.count_nonzero(processed_rd[target_row-1:target_row+2, :]) / 3)
+                missing_rate.append(detected / total)
 
                 # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
                 velocity_mask = np.abs(velocity_axis) < 56
@@ -277,185 +265,62 @@ class FusedDataset(Dataset):
         num_none_zero = np.array(num_none_zero, dtype=np.int32)
         num_none_zero_row = np.array(num_none_zero_row, dtype=np.float32)
         extra_features = np.stack([num_none_zero, num_none_zero_row], axis=1)
-        return rd_matrices, point_index, extra_features
-
-    @staticmethod
-    def _load_track_data(point_filepath, track_filepath):
-        """
-        使用 polars 高效加载、合并数据并进行特征工程
-        :param point_filepath: 点迹文件路径
-        :param track_filepath: 航迹文件路径
-        :return: 合并和处理后的特征数据 (NumPy Array)
-        """
-        try:
-            # 1. 加载数据，并明确指定有表头
-            preprocessed_data = TrajectoryDataProcessor(point_filepath, track_filepath).get_processed_data()
-            df_point = pl.from_pandas(preprocessed_data['point_data'])
-            df_track = pl.from_pandas(preprocessed_data['track_data'])
-
-            # 2. 数据类型转换和合并
-            df = df_point.join(df_track, on=["时间", "批号"], how="left").sort("时间")
-
-            # 3. 特征工程 (基于用户提供的新逻辑)
-            # 3.1 计算衍生的时序特征
-            df = df.with_columns(
-                (pl.col("滤波距离") * pl.col("滤波俯仰").radians().sin()).alias("高度"),
-                (pl.col("X向速度").pow(2) + pl.col("Y向速度").pow(2)).sqrt().alias("水平速度"),
-            )
-
-            df = df.with_columns(
-                pl.arctan2(pl.col("Z向速度"), pl.col("水平速度")).alias("爬升/俯冲角度_弧度"),
-                (pl.col("和幅度") * pl.col("滤波距离").pow(4)).log10().alias("RCS"),
-            )
-
-            # 3.2 计算运动方向特征（用于鸟类识别）
-            # 计算相邻时刻的方向变化角度
-            df = df.with_columns(
-                # 当前时刻的速度向量模长
-                (pl.col("X向速度").pow(2) + pl.col("Y向速度").pow(2) + pl.col("Z向速度").pow(2)).sqrt().alias(
-                    "三维速度模长"),
-                # 计算时间差（用于角速度计算）
-                (pl.col("时间").diff().dt.total_seconds()).alias("时间差"),
-            )
-
-            # 计算相邻速度向量的点积和夹角
-            df = df.with_columns(
-                # 相邻时刻速度向量点积
-                (pl.col("X向速度") * pl.col("X向速度").shift(1) +
-                 pl.col("Y向速度") * pl.col("Y向速度").shift(1) +
-                 pl.col("Z向速度") * pl.col("Z向速度").shift(1)).alias("速度向量点积"),
-                # 相邻时刻速度向量模长乘积
-                (pl.col("三维速度模长") * pl.col("三维速度模长").shift(1)).alias("速度模长乘积"),
-            )
-
-            # 计算转向角度和角速度
-            df = df.with_columns(
-                # 转向角度 = arccos(dot_product / (|v1| * |v2|))
-                pl.when(pl.col("速度模长乘积") > 1e-6)
-                .then((pl.col("速度向量点积") / pl.col("速度模长乘积")).clip(-1.0, 1.0).arccos())
-                .otherwise(0.0).alias("转向角度"),
-            )
-
-            df = df.with_columns(
-                # 角速度 = 转向角度 / 时间差
-                pl.when(pl.col("时间差") > 1e-6)
-                .then(pl.col("转向角度") / pl.col("时间差"))
-                .otherwise(0.0).alias("角速度"),
-            )
-
-            # 3.3 计算抖动特征（二阶差分）
-            df = df.with_columns(
-                # 多普勒速度的二阶差分
-                pl.col("多普勒速度").diff().diff().alias("多普勒二阶差分"),
-                # 幅度的二阶差分
-                pl.col("和幅度").diff().diff().alias("幅度二阶差分"),
-                # 位置的二阶差分
-                pl.col("滤波距离").diff().diff().alias("距离二阶差分"),
-                pl.col("滤波方位").diff().diff().alias("方位二阶差分"),
-                pl.col("滤波俯仰").diff().diff().alias("俯仰二阶差分"),
-            )
-
-            # 3.4 mask机制的计算累积统计特征
-            df = df.with_columns(
-                # 原有特征
-                pl.col("全速度").cum_min().alias("最小全速度"),
-                pl.col("全速度").cum_sum() / (pl.int_range(pl.len()) + 1).alias("平均全速度"),
-                pl.col("水平速度").cum_sum() / (pl.int_range(pl.len()) + 1).alias("平均水平速度"),
-                pl.col("高度").cum_sum() / (pl.int_range(pl.len()) + 1).alias("平均高度"),
-                pl.col("高度").cum_max().alias("最大高度"),
-                pl.col("高度").cum_min().alias("最小高度"),
-                pl.col("全速度").cum_max().alias("最大全速度"),
-                pl.col("水平速度").cum_max().alias("最大水平速度"),
-                pl.col("水平速度").cum_min().alias("最小水平速度"),
-
-                # 新增：转向角度和角速度的累积统计
-                pl.col("转向角度").cum_sum() / (pl.int_range(pl.len()) + 1).alias("转向角度累积均值"),
-                pl.col("角速度").cum_sum() / (pl.int_range(pl.len()) + 1).alias("角速度累积均值"),
-            )
-
-            # 计算累积波动范围和标准差
-            df = df.with_columns(
-                (pl.col("高度").cum_max() - pl.col("高度").cum_min()).alias("高度波动范围"),
-                (pl.col("水平速度").cum_max() - pl.col("水平速度").cum_min()).alias("水平速度波动范围"),
-                # 累积标准差（使用累积方差的平方根）
-                ((pl.col("高度").pow(2).cum_sum() / (pl.int_range(pl.len()) + 1) -
-                  (pl.col("高度").cum_sum() / (pl.int_range(pl.len()) + 1)).pow(2)).sqrt()).alias("高度标准差"),
-
-                # 转向角度和角速度的累积标准差
-                ((pl.col("转向角度").pow(2).cum_sum() / (pl.int_range(pl.len()) + 1) -
-                  (pl.col("转向角度").cum_sum() / (pl.int_range(pl.len()) + 1)).pow(2)).sqrt()).alias(
-                    "转向角度累积标准差"),
-                ((pl.col("角速度").pow(2).cum_sum() / (pl.int_range(pl.len()) + 1) -
-                  (pl.col("角速度").cum_sum() / (pl.int_range(pl.len()) + 1)).pow(2)).sqrt()).alias("角速度累积标准差"),
-
-                # 抖动指数（二阶差分的累积标准差）
-                ((pl.col("多普勒二阶差分").pow(2).cum_sum() / (pl.int_range(pl.len()) + 1)).sqrt()).alias(
-                    "多普勒抖动指数"),
-                ((pl.col("幅度二阶差分").pow(2).cum_sum() / (pl.int_range(pl.len()) + 1)).sqrt()).alias("幅度抖动指数"),
-                ((pl.col("距离二阶差分").pow(2) + pl.col("方位二阶差分").pow(2) + pl.col("俯仰二阶差分").pow(2))
-                 .cum_sum() / (pl.int_range(pl.len()) + 1)).sqrt().alias("位置抖动指数"),
-            )
-
-            # 4. 最终的特征
-            final_feature_columns = [
-                # 衍生特征
-                "高度", "水平速度", "爬升/俯冲角度_弧度", "RCS",
-                # 统计特征
-                "最小全速度", "平均全速度", "平均水平速度", "平均高度",
-                "最大高度", "最小高度", "高度波动范围", "高度标准差",
-                "最大全速度", "最大水平速度", "最小水平速度", "水平速度波动范围",
-                # 新增鸟类识别特征
-                "转向角度累积均值", "转向角度累积标准差",
-                "角速度累积均值", "角速度累积标准差",
-                "多普勒抖动指数", "幅度抖动指数", "位置抖动指数",
-                # 原始特征
-                "俯仰", "多普勒速度", "和幅度", "信噪比", "原始点数量"
-            ]
-            df_final_features = df.select(final_feature_columns)
-
-            # 5. 一次性填充所有因计算差分等产生的空值
-            df_final_features = df_final_features.fill_null(0.0).fill_nan(0.0)
-
-            return df_final_features.to_numpy(order='c').astype(np.float32)
-
-        except Exception as e:
-            print(f"处理文件时出错 {point_filepath}: {e}")
-            return None
+        missing_rate = np.array(missing_rate, dtype=np.float32)
+        return rd_matrices, point_index, extra_features, missing_rate
 
 
 def collate_fn(batch):
-    batch_files, point_indices, stacked_images, stacked_tracks, stacked_extra_features, image_masks, track_masks, labels = \
-        [], [], [], [], [], [], [], []
-    for (batch_file, point_index, images, merged_data, extra_features, image_mask, track_mask, cls) in batch:
-        if images is None or merged_data is None:
+    batch_files, point_indices, stacked_images, stacked_extra_features, stacked_missing_rate, image_masks, labels = \
+        [], [], [], [], [], [], []
+    for (batch_file, point_index, images, extra_features, missing_rate, image_mask, cls) in batch:
+        if images is None:
             continue
         batch_files.append(batch_file)
         point_indices.append(point_index)
         stacked_images.append(images)
-        stacked_tracks.append(merged_data)
         stacked_extra_features.append(extra_features)
+        stacked_missing_rate.append(missing_rate)
         image_masks.append(image_mask)
-        track_masks.append(track_mask)
         labels.append(cls)
     point_indices = torch.from_numpy(np.stack(point_indices, axis=0))
     stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
-    stacked_tracks = torch.from_numpy(np.stack(stacked_tracks, axis=0))
     stacked_extra_features = torch.from_numpy(np.stack(stacked_extra_features, axis=0))
+    stacked_missing_rate = torch.from_numpy(np.stack(stacked_missing_rate, axis=0))
     image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
-    track_masks = torch.from_numpy(np.stack(track_masks, axis=0))
     labels = torch.tensor(labels, dtype=torch.long)
-    return batch_files, point_indices, stacked_images, stacked_tracks, stacked_extra_features, image_masks, track_masks, labels
+    return batch_files, point_indices, stacked_images, stacked_extra_features, stacked_missing_rate, image_masks, labels
 
 
 if __name__ == '__main__':
-    from fusion.utils.visualize import visualize_rd_matrix
+    from tqdm import tqdm
+    import glob
+    import re
+    import plotly.graph_objects as go
 
     data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    batch = 33
-    label = 1
-    batch_file = BatchFile(batch, label, os.path.join(data_root, f"原始回波/{batch}_Label_{label}.dat"),
-                           os.path.join(data_root, f"点迹/PointTracks_{batch}_{label}_23.txt"),
-                           os.path.join(data_root, f"航迹/Tracks_{batch}_{label}_23.txt"))
-    rd_matrices, ranges, velocities = process_batch(batch_file)
-    for i in range(min(50, len(rd_matrices))):
-        visualize_rd_matrix(rd_matrices[i], ranges[i], velocities[i], batch, label, i)
+    point_files = glob.glob(os.path.join(data_root, "点迹/PointTracks_*.txt"))
+    missing = {i: [] for i in range(4)}
+    for point_file in tqdm(point_files):
+        match_result = re.match(r"PointTracks_(\d+)_(\d+)_(\d+).txt", os.path.basename(point_file))
+        batch_id = int(match_result.group(1))
+        label = int(match_result.group(2))
+        if label > 4:
+            continue
+        num_points = int(match_result.group(3))
+        raw_file = os.path.join(data_root, f"原始回波/{batch_id}_Label_{label}.dat")
+        track_file = os.path.join(data_root, f"航迹/Tracks_{batch_id}_{label}_{num_points}.txt")
+        batch_file = BatchFile(batch_id, label, raw_file, point_file, track_file)
+        rd_matrices, ranges, velocities, missing_rates = process_batch(batch_file)
+        if rd_matrices is None or len(rd_matrices) == 0:
+            continue
+        missing[label-1].append(missing_rates[5])
+    for k, v in missing.items():
+        fig = go.Figure(data=[go.Histogram(x=v, histnorm='probability', nbinsx=30)])
+        fig.update_layout(
+            title_text="缺失率（中位数）分布",
+            xaxis_title_text="缺失率（中位数）",
+            yaxis_title_text="占比",
+            bargap=0.2,
+            bargroupgap=0.1
+        )
+        fig.show()

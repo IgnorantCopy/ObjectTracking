@@ -397,18 +397,20 @@ def func_ca_cfar_detect_all_targets_new(data_power, detection_rows, detection_co
 
 def MDB_RG_detector_2d(rd_matrix, velocity_axis,
                        detection_area_rows, detection_area_cols,
-                       select_threshold_factor, expand_threshold_factor,
-                       expand_distance=1):
+                       select_threshold_ratio=0.1, expand_threshold_ratio=0.35,
+                       expand_distance=1, min_region_size=3):
     """
-    对RD矩阵执行2D-MDB检测
+    对RD矩阵执行基于相对阈值的2D-MDB-RG检测算法
+
     :param rd_matrix: 输入的 RD 矩阵 (linear)
     :param velocity_axis: 多普勒速度轴
     :param detection_area_rows: 距离维检测区域行索引范围
     :param detection_area_cols: 多普勒维检测区域列索引范围
-    :param select_threshold_factor: 选择种子点的阈值因子
-    :param expand_threshold_factor: 区域生长的阈值因子
+    :param select_threshold_ratio: 选择种子点的阈值比例 (0-1之间)
+    :param expand_threshold_ratio: 区域生长的阈值比例 (0-1之间)
     :param expand_distance: 扩展距离, 默认为1(是3x3的区域)
-    :return: 如果找到目标, 返回加了目标掩码的RD矩阵(直接就是目标,不是十字掩码); 否则返回None
+    :param min_region_size: 最小区域大小，小于此值的区域将被忽略
+    :return: 如果找到目标, 返回加了目标掩码的RD矩阵; 否则返回None
     """
     if rd_matrix.size == 0:
         return None
@@ -432,6 +434,10 @@ def MDB_RG_detector_2d(rd_matrix, velocity_axis,
     center_col = detection_area_cols[center_col_idx]
     center_value = rd_matrix[center_row, center_col]
 
+    # 确保中心值为正值以避免除零错误
+    if center_value <= 0:
+        return None
+
     # 获取检测区域内所有点的索引，并按幅度降序排列
     flat_indices = np.argsort(detection_area_data.ravel())[::-1]  # 降序
     rows_in_detection_area, cols_in_detection_area = np.unravel_index(
@@ -450,8 +456,15 @@ def MDB_RG_detector_2d(rd_matrix, velocity_axis,
         i = detection_area_rows[curr_row_in_area]
         j = detection_area_cols[curr_col_in_area]
 
-        # 判断当前点与中心点的强度差距是否小于阈值
-        if abs(rd_matrix[i, j] - center_value) < select_threshold_factor:
+        curr_value = rd_matrix[i, j]
+        if curr_value <= 0:
+            continue  # 跳过非正值
+
+        # 使用相对阈值：当前点与中心点的相对差异
+        relative_diff = abs(curr_value - center_value) / max(center_value, curr_value)
+
+        # 判断当前点与中心点的强度相对差距是否小于阈值比例
+        if relative_diff < select_threshold_ratio:
             # 检查该点的速度是否超过56
             if abs(velocity_axis[j]) > 56:
                 continue  # 速度过大，跳过该点
@@ -460,8 +473,8 @@ def MDB_RG_detector_2d(rd_matrix, velocity_axis,
             seed_col = j
             break
 
-    # 如果没找到合适的种子点, 或者速度过大, 返回None
-    if seed_row is None or velocity_axis[seed_col] > 56:
+    # 如果没找到合适的种子点，返回None
+    if seed_row is None:
         return None
 
     # === 区域生长算法 ===
@@ -470,7 +483,8 @@ def MDB_RG_detector_2d(rd_matrix, velocity_axis,
 
     # 使用队列进行区域生长
     queue = [(seed_row, seed_col)]
-    target_mask[seed_row, seed_col] = 1
+    target_mask[seed_row, seed_col] = True
+    seed_value = rd_matrix[seed_row, seed_col]
 
     while queue:
         curr_row, curr_col = queue.pop(0)
@@ -489,16 +503,35 @@ def MDB_RG_detector_2d(rd_matrix, velocity_axis,
                 if target_mask[r, c]:
                     continue
 
+                # 获取待检测点的值
+                neighbor_value = rd_matrix[r, c]
+
+                if neighbor_value <= 0:
+                    continue  # 跳过非正值
+
+                # 计算相对差异：使用两种方法并取最小值以增强鲁棒性
+                # 1. 相对于当前点的差异
+                rel_diff_curr = abs(neighbor_value - curr_value) / max(neighbor_value, curr_value)
+                # 2. 相对于种子点的差异
+                rel_diff_seed = abs(neighbor_value - seed_value) / max(neighbor_value, seed_value)
+
+                # 取较小的相对差异
+                relative_diff = min(rel_diff_curr, rel_diff_seed)
+
                 # 判断相邻点是否应该被纳入目标区域
-                if abs(rd_matrix[r, c] - curr_value) < expand_threshold_factor:
-                    target_mask[r, c] = 1
+                if relative_diff < expand_threshold_ratio:
+                    target_mask[r, c] = True
                     queue.append((r, c))
 
-    # 应用掩码到RD矩阵
+    # 判断检测到的目标区域大小是否满足最小要求
+    if np.sum(target_mask) < min_region_size:
+        return None
+
+    # 应用掩码到RD矩阵并找到目标的中心位置
     if np.any(target_mask):
         return rd_matrix * target_mask
-    else:
-        return None
+
+    return None
 
 
 def process_batch(batch: BatchFile):
@@ -508,6 +541,9 @@ def process_batch(batch: BatchFile):
     rd_matrices = []
     ranges = []
     velocities = []
+    missing_rates = []
+    total = 0
+    detected = 0
 
     with open(batch.raw_file, 'rb') as fid:
         while True:
@@ -649,11 +685,12 @@ def process_batch(batch: BatchFile):
                 num_training_cells_doppler=4,
                 cfar_threshold_factor=5
             )
-
+            total += 1
             if processed_rd is None:
                 print(f"帧 {frame_count} 未找到目标，跳过该帧")
                 continue  # 未找到目标，跳过此帧
-
+            detected += 1
+            missing_rates.append(1 - detected / total)
             rd_matrix = processed_rd
 
             # rd_matrix[rd_matrix < np.percentile(rd_matrix, 5)] = 0
@@ -667,9 +704,7 @@ def process_batch(batch: BatchFile):
             ranges.append(range_axis)
             velocities.append(velocity_axis)
 
-
-
-    return rd_matrices, ranges, velocities
+    return rd_matrices, ranges, velocities, missing_rates
 
 
 def get_batch_file_list(root_dir: str):
