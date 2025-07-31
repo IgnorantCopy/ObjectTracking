@@ -356,35 +356,6 @@ def func_ca_cfar_detect_all_targets_new(data_power, detection_rows, detection_co
             status_map[local_row, local_col] = 2
             continue
 
-        # 多普勒向参考单元（左右取较小值）
-        sum_noise_left, count_noise_left = 0, 0
-        for d_ref in range(j - Gd - Td, j - Gd):
-            if 0 <= d_ref < num_cols:
-                if detection_cols[0] <= d_ref <= detection_cols[-1]:
-                    local_d = d_ref - detection_cols[0]
-                    if status_map[local_row, local_d] in [1, 2]:
-                        continue
-                sum_noise_left += data_power[i, d_ref]
-                count_noise_left += 1
-
-        sum_noise_right, count_noise_right = 0, 0
-        for d_ref in range(j + Gd + 1, j + Gd + Td + 1):
-            if 0 <= d_ref < num_cols:
-                if detection_cols[0] <= d_ref <= detection_cols[-1]:
-                    local_d = d_ref - detection_cols[0]
-                    if status_map[local_row, local_d] in [1, 2]:
-                        continue
-                sum_noise_right += data_power[i, d_ref]
-                count_noise_right += 1
-
-        # 取左右两侧噪声估计的较小值
-        noise_avg_left = sum_noise_left / count_noise_left if count_noise_left > 0 else float('inf')
-        noise_avg_right = sum_noise_right / count_noise_right if count_noise_right > 0 else float('inf')
-        noise_avg_doppler = min(noise_avg_left, noise_avg_right)
-
-        if np.isinf(noise_avg_doppler) or cut_power <= threshold_factor * noise_avg_doppler:
-            is_target = False
-
         # 最终判定
         if is_target:
             status_map[local_row, local_col] = 1
@@ -587,7 +558,7 @@ def process_batch(batch: BatchFile):
 
             # 目标中心位于第16个距离单元
             center_local_bin = 15
-            local_radius = 5
+            local_radius = 10
 
             # 计算局部检测窗口
             range_start_local = max(0, center_local_bin - local_radius)
