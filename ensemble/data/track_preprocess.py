@@ -302,58 +302,6 @@ class TrajectoryDataProcessor(object):
 
         return series_copy
 
-    def _interpolate_outliers(self, series, outlier_mask):
-        """插值修复异常值"""
-        if outlier_mask.sum() == 0:
-            return series.copy()
-
-        series_copy = series.copy()
-        valid_indices = ~outlier_mask
-
-        if valid_indices.sum() < 2:
-            # 如果有效点太少，用均值填充
-            fill_value = series[valid_indices].mean()
-            if pd.isna(fill_value):  # 如果均值为NaN，尝试用中位数
-                fill_value = series.median()
-                if pd.isna(fill_value):  # 如果中位数也为NaN，用0填充
-                    fill_value = 0
-            series_copy[outlier_mask] = fill_value
-            return series_copy
-
-        # 获取有效数据点
-        valid_x = np.where(valid_indices)[0]
-        valid_y = series[valid_indices].values
-
-        # 需要插值的点
-        outlier_x = np.where(outlier_mask)[0]
-
-        try:
-            if self.interpolation_method == 'linear':
-                f = interpolate.interp1d(valid_x, valid_y, kind='linear',
-                                         bounds_error=False, fill_value='extrapolate')
-            elif self.interpolation_method == 'cubic' and len(valid_x) >= 4:
-                f = interpolate.interp1d(valid_x, valid_y, kind='cubic',
-                                         bounds_error=False, fill_value='extrapolate')
-            elif self.interpolation_method == 'quadratic' and len(valid_x) >= 3:
-                f = interpolate.interp1d(valid_x, valid_y, kind='quadratic',
-                                         bounds_error=False, fill_value='extrapolate')
-            else:
-                f = interpolate.interp1d(valid_x, valid_y, kind='linear',
-                                         bounds_error=False, fill_value='extrapolate')
-
-            # 执行插值
-            interpolated_values = f(outlier_x)
-            series_copy.iloc[outlier_x] = interpolated_values
-
-        except Exception as e:
-            print(f"插值失败，使用均值填充: {e}")
-            fill_value = series[valid_indices].mean()
-            if pd.isna(fill_value):
-                fill_value = 0
-            series_copy[outlier_mask] = fill_value
-
-        return series_copy
-
     def _process_point_outliers(self):
         """处理点迹数据异常值"""
         if self.point_data is None:
@@ -383,7 +331,7 @@ class TrajectoryDataProcessor(object):
             if combined_outliers.sum() > 0:
                 if self.verbose:
                     print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个多普勒速度异常值")
-                corrected_doppler = self._interpolate_outliers(doppler_series, combined_outliers)
+                corrected_doppler = self._extrapolate_outliers(doppler_series, combined_outliers)
                 processed_data.loc[batch_mask, '多普勒速度'] = corrected_doppler.values
 
             # 处理其他可能的异常值
@@ -394,7 +342,6 @@ class TrajectoryDataProcessor(object):
                     if outliers.sum() > 0:
                         if self.verbose:
                             print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
-                        # corrected_series = self._interpolate_outliers(series, outliers)
                         corrected_series = self._extrapolate_outliers(series, outliers)
                         processed_data.loc[batch_mask, col] = corrected_series.values
 
@@ -431,7 +378,7 @@ class TrajectoryDataProcessor(object):
                     if combined_outliers.sum() > 0:
                         if self.verbose:
                             print(f"批号 {batch_id}: 检测到 {combined_outliers.sum()} 个{col}异常值")
-                        corrected_velocity = self._interpolate_outliers(velocity_series, combined_outliers)
+                        corrected_velocity = self._extrapolate_outliers(velocity_series, combined_outliers)
                         processed_data.loc[batch_mask, col] = corrected_velocity.values
 
             # 处理位置和角度异常值
@@ -442,7 +389,6 @@ class TrajectoryDataProcessor(object):
                     if outliers.sum() > 0:
                         if self.verbose:
                             print(f"批号 {batch_id}: 检测到 {outliers.sum()} 个{col}异常值")
-                        # corrected_series = self._interpolate_outliers(series, outliers)
                         corrected_series = self._extrapolate_outliers(series, outliers)
                         processed_data.loc[batch_mask, col] = corrected_series.values
 
