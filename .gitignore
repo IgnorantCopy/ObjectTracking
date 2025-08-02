@@ -174,14 +174,14 @@ cython_debug/
 .pypirc
 
 # custom
-data/echo_sequence/dataset
+data/echo_sequence/dataset/
 record/
 frame_wise/logs
 src/
 seq_wise/logs/
 fusion/logs/
 noise_cls/logs/
-ensemble/track_results
+ensemble/track_results/
 ensemble/logs/
-ensemble/LatestResults
-ensemble/track_models
+ensemble/LatestResults/
+ensemble/ckpt/

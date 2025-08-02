@@ -14,7 +14,7 @@ from fusion.data import dataset
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path", type=str, default='./configs/fused.yaml', help="path to config file")
+    parser.add_argument("--config-path", type=str, default='./configs/swin.yaml', help="path to config file")
     parser.add_argument("--device",      type=str, default="cuda",                 help="device to use", choices=["cuda", "cpu"])
     parser.add_argument("--pretrain",    type=str, required=True,                  help="path to the pretrain model")
     args = parser.parse_args()

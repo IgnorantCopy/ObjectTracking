@@ -1,5 +1,6 @@
 import os
 import yaml
+import pickle
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -109,3 +110,13 @@ def get_transform(channels, height, width):
                              std=[0.5 for _ in range(channels)]),
     ])
     return train_transform, val_transform
+
+
+def get_scaler(track_model_path, track_seq_len):
+    scalers = []
+    for i in range(1, track_seq_len + 1):
+        scaler_path = os.path.join(track_model_path, f"scaler_{i}.pkl")
+        with open(scaler_path, 'rb') as f:
+            scaler = pickle.load(f)
+        scalers.append(scaler)
+    return scalers

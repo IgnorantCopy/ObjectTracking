@@ -14,23 +14,25 @@ import multiprocessing
 from utils import config, visualize
 from data import dataset
 from utils.logger import Logger
+from models.rocket import Rocket
+from models.stacking import Stacking
 
 
 def config_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config-path", type=str, default='./configs/swin.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="./logs",               help="path to log file")
-    parser.add_argument("--resume",      type=str, default=None,                   help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cuda",                 help="device to use", choices=["cuda", "cpu"])
-    parser.add_argument("--phase",       type=str, default="pretrain",             help="train or pretrain", choices=["train", "pretrain"])
-    parser.add_argument("--pretrain",    type=str, default=None,                   help="path to the pretrain model")
-    parser.add_argument("--result-path", type=str, default=None,                   help="path to store the result file")
+    parser.add_argument("--config-path", type=str, default='./configs/fusion.yaml', help="path to config file")
+    parser.add_argument("--log-path",    type=str, default="./logs",                help="path to log file")
+    parser.add_argument("--rd-model",    type=str, required=True,                   help="path to rd model")
+    parser.add_argument("--track-model", type=str, required=True,                   help="path to track model")
+    parser.add_argument("--resume",      type=str, default=None,                    help="path to checkpoint file")
+    parser.add_argument("--device",      type=str, default="cuda",                  help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--result-path", type=str, default=None,                    help="path to store the result file")
     args = parser.parse_args()
     print(args)
     return args
 
 
-def train(model, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
+def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
     model.train()
     train_loss = 0.
     train_time = time.time()
@@ -39,7 +41,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
     conf_mat = np.zeros((num_classes, num_classes))
     train_max_begin_time = 0
     train_avg_rate = 0.
-    for i, (_, point_index, image, extra_features, missing_rate, image_mask, label) \
+    for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
             in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
         image = image.to(device)
         if use_flash_attn:
@@ -49,6 +51,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
         label = label.to(device)
         optimizer.zero_grad()
 
+        track_features = track_features.squeeze(1)
         cls_loss = 0.
         begin_times = [track_seq_len for _ in range(len(image))]
         pred = []
@@ -56,6 +59,8 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
         for t in range(track_seq_len):
             index_mask_t = (point_index <= t + 1)
             image_mask_t = image_mask * index_mask_t
+            track_features_t = track_features[:, :t+1, :]
+            track_features_t = scalers[t].transform(track_features_t.reshape(-1, track_features_t.shape[-1])).reshape(-1, t+1, track_features_t.shape[-1])
 
             image_mask_t = image_mask_t.to(device)
 
@@ -69,24 +74,20 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
             extra_features_t = torch.stack(extra_features_t).float().to(device)
             missing_rate_t = missing_rate[:, t].float().to(device)
 
-            output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
+            output_t = model(track_features_t, t + 1, image, extra_features_t, missing_rate_t, image_mask_t)
             output_max_t, pred_t = output_t.max(1)
-            pred_copy = pred_t.clone()
-            pred_copy[output_max_t < threshold] = -1
 
-            for j in range(len(pred_copy)):
-                if pred_copy[j] != -1 and not begin[j]:
-                    begin[j] = True
-                    begin_times[j] = t
-                elif pred_copy[j] == -1 and begin[j]:
-                    pred_copy[j] = pred_t[j]
-            pred.append(pred_copy.cpu().tolist())
+            for j in range(len(pred_t)):
+                if not begin[j]:
+                    if output_max_t[j] > threshold:
+                        begin[j] = True
+                        begin_times[j] = t
+                    else:
+                        pred_t[j] = -1
+            pred.append(pred_t.cpu().tolist())
 
             cls_loss_t = criterion(output_t, label)
             cls_loss += cls_loss_t
-            # 释放显存
-            del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
-            torch.cuda.empty_cache()
 
         cls_loss /= track_seq_len
         begin_times = torch.tensor(begin_times, dtype=torch.float, device=device)
@@ -109,8 +110,9 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
                 continue
             unique_vals, counts = np.unique(pred_j, return_counts=True)
             pred_label = unique_vals[counts.argmax()]
-            train_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
-            if pred_label == gt:
+            rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
+            train_avg_rate += rate
+            if pred_label == gt and rate > 0.9:
                 corrects[gt] += 1
             conf_mat[pred_label][gt] += 1
 
@@ -122,7 +124,7 @@ def train(model, train_loader, optimizer, criterion, alpha, threshold, device, n
     return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, conf_mat
 
 
-def val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
+def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
     model.eval()
     val_loss = 0.
     val_time = time.time()
@@ -132,7 +134,7 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
     val_max_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
-        for i, (_, point_index, image, extra_features, missing_rate, image_mask, label) \
+        for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
                 in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
             image = image.to(device)
             if use_flash_attn:
@@ -140,6 +142,7 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
             else:
                 image = image.float()
             label = label.to(device)
+            track_features = track_features.squeeze(1)
 
             cls_loss = 0.
             begin_times = [track_seq_len for _ in range(len(image))]
@@ -148,6 +151,9 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
             for t in range(track_seq_len):
                 index_mask_t = (point_index <= t + 1)
                 image_mask_t = image_mask * index_mask_t
+                track_features_t = track_features[:, :t+1, :]
+                track_features_t = scalers[t].transform(track_features_t.reshape(-1, track_features_t.shape[-1])).reshape(-1, t+1, track_features_t.shape[-1])
+
                 image_mask_t = image_mask_t.to(device)
 
                 extra_features_t = []
@@ -160,24 +166,21 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
                 missing_rate_t = missing_rate[:, t].float().to(device)
 
-                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
+                output_t = model(track_features_t, t + 1, image, extra_features_t, missing_rate_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
-                pred_copy = pred_t.clone()
-                pred_copy[output_max_t < threshold] = -1
 
-                for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin[j]:
-                        begin[j] = True
-                        begin_times[j] = t
-                    elif pred_copy[j] == -1 and begin[j]:
-                        pred_copy[j] = pred_t[j]
-                pred.append(pred_copy.cpu().tolist())
+                for j in range(len(pred_t)):
+                    if not begin[j]:
+                        if output_max_t[j] > threshold:
+                            begin[j] = True
+                            begin_times[j] = t
+                        else:
+                            pred_t[j] = -1
+                pred.append(pred_t.cpu().tolist())
 
                 cls_loss_t = criterion(output_t, label)
                 cls_loss += cls_loss_t
-                # 释放显存
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
-                torch.cuda.empty_cache()
+
             cls_loss /= track_seq_len
             begin_times = torch.tensor(begin_times)
             val_max_begin_time = max(val_max_begin_time, begin_times.max().item())
@@ -197,8 +200,9 @@ def val(model, val_loader, criterion, alpha, threshold, device, num_classes, tra
                     continue
                 unique_vals, counts = np.unique(pred_j, return_counts=True)
                 pred_label = unique_vals[counts.argmax()]
-                val_avg_rate += len(pred_j[pred_j == pred_label]) / len(pred_j)
-                if pred_label == gt:
+                rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
+                val_avg_rate += rate
+                if pred_label == gt and rate > 0.9:
                     corrects[gt] += 1
                 conf_mat[pred_label][gt] += 1
     val_acc = corrects.sum() / totals.sum()
@@ -384,13 +388,13 @@ def save_model(model, optimizer, lr_scheduler, epoch, best_acc, filename):
 
 def main():
     args = config_parser()
-    config_path   = args.config_path
-    log_path      = args.log_path
-    resume        = args.resume
-    device        = args.device if torch.cuda.is_available() else "cpu"
-    phase         = args.phase
-    pretrain      = args.pretrain
-    result_path   = args.result_path
+    config_path      = args.config_path
+    log_path         = args.log_path
+    rd_model_path    = args.rd_model
+    track_model_path = args.track_model
+    resume           = args.resume
+    device           = args.device if torch.cuda.is_available() else "cpu"
+    result_path      = args.result_path
 
     log_path = os.path.join(log_path, datetime.now().strftime("%Y%m%d-%H%M%S"))
     config.check_paths(log_path)
@@ -422,19 +426,18 @@ def main():
     loss_config      = train_config['loss']
 
 
-    if phase == "pretrain":
-        num_classes -= 2    # exclude noise and unknown class
-        model = config.get_model(model_config, channels, num_classes)
-    elif phase == "train":
-        if not pretrain:
-            raise ValueError("Pretrain model is not provided.")
-        pretrain_checkpoint = torch.load(pretrain)
-        model = config.get_model(model_config, channels, num_classes - 2)
-        model.load_state_dict(pretrain_checkpoint['state_dict'])
-        model.head = nn.Linear(model.head.in_features, num_classes)
-    else:
-        raise ValueError("Invalid phase.")
+    num_classes -= 2    # exclude noise and unknown class
+    rd_model = config.get_model(model_config, channels, num_classes)
+    if rd_model_path:
+        checkpoint = torch.load(rd_model_path, weights_only=False)
+        rd_model.load_state_dict(checkpoint['state_dict'])
+        logger.log(f"Loaded checkpoint from {rd_model_path}")
+    if use_flash_attn:
+        rd_model.half()
+    rd_model.to(device)
 
+    track_model = Rocket(track_model_path, track_seq_len)
+    model = Stacking([rd_model, track_model], num_classes)
     optimizer = config.get_optimizer(optimizer_config, model, lr)
     lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
     criterion = config.get_criterion(loss_config)
@@ -442,7 +445,7 @@ def main():
     start_epoch = 0
     best_acc = 0.
     if resume:
-        checkpoint = torch.load(resume)
+        checkpoint = torch.load(resume, weights_only=False)
         model.load_state_dict(checkpoint['state_dict'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         optimizer.load_state_dict(checkpoint['optimizer'])
@@ -453,24 +456,27 @@ def main():
         start_epoch = checkpoint['epoch']
         best_acc = checkpoint['best_acc']
         logger.log(f"Loaded checkpoint from {resume}")
-    if use_flash_attn:
-        model.half()
     model.to(device)
 
     train_transform, val_transform = config.get_transform(channels, height, width)
+    scalers = config.get_scaler(track_model_path, track_seq_len)
+
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
-    train_dataset = dataset.RDMap(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
-                                  track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.RDMap(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
+    train_dataset = dataset.FusedDataset(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
+                                         track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+    val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
+                                       track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                              collate_fn=dataset.FusedDataset.collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                            collate_fn=dataset.FusedDataset.collate_fn)
+
 
     for epoch in range(start_epoch, epochs):
         logger.log(f'-------------- Epoch {epoch + 1}/{epochs} --------------')
 
         train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, train_conf_mat = \
-            train(model, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
+            train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/avg_acc", train_acc, epoch)
@@ -487,7 +493,7 @@ def main():
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
         val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, val_conf_mat = \
-            val(model, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
+            val(model, scalers, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/avg_acc", val_acc, epoch)

@@ -31,7 +31,7 @@ data:
 train:
   batch_size: 8
   num_workers: 4
-  num_epochs: 1
+  num_epochs: 100
   lr: 0.01
   height: 32
   width: 544
@@ -49,6 +49,5 @@ train:
     momentum: 0.9
     weight_decay: 0.0005
   loss:
-    name: FocalLoss
-    gamma: 2.0
+    name: CrossEntropyLoss
 
