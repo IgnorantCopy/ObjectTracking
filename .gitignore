@@ -177,7 +177,6 @@ cython_debug/
 data/echo_sequence/dataset/
 record/
 frame_wise/logs
-src/
 seq_wise/logs/
 fusion/logs/
 noise_cls/logs/
@@ -185,3 +184,4 @@ ensemble/track_results/
 ensemble/logs/
 ensemble/LatestResults/
 ensemble/ckpt/
+ensemble/src/training/checkpoints/

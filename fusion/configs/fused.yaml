@@ -1,14 +1,14 @@
 rd_model:
   name: SwinTransformer
   patch_depth: 4
-  patch_height: 2
+  patch_height: 4
   patch_width: 34
   embed_dim: 96
   depths: [ 2, 2 ]
   heads: [ 3, 6 ]
-  window_depth: 2
+  window_depth: 4
   window_height: 4
-  window_width: 4
+  window_width: 8
   ff_ratio: 4.0
   qkv_bias: True
   dropout: 0.1
@@ -22,7 +22,7 @@ rd_model:
 
 track_model:
   name: RoFormer
-  input_dim: 21
+  input_dim: 28
   d_model: 256
   heads: 8
   depth: 4
