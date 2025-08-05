@@ -132,7 +132,7 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
     labels = np.array(streaming_results['labels'])
     rates = np.array(streaming_results['rates'])
     timestep_predictions = np.array(streaming_results['timestep_predictions'])
-    for t in range(sequences.shape[0]):
+    for t in range(sequences.shape[1]):
         pred_t = timestep_predictions[:, t]
         streaming_accuracies.append(accuracy_score(labels, pred_t))
     avg_acc = 0
@@ -195,7 +195,7 @@ def comprehensive_model_evaluation(checkpoint_path: str):
     model, checkpoint, device = load_trained_model(checkpoint_path, device)
     
     # 加载数据
-    print("\\n加载测试数据...")
+    print("\n加载测试数据...")
     data_loader = TrajectoryDataLoader(
         batch_size=64,
         train_split=0.7,
@@ -221,7 +221,7 @@ def main():
     print("=" * 60)
     
     # 检查文件
-    checkpoint_path = "checkpoints/best_streaming_model.pth"
+    checkpoint_path = "checkpoints/0/best_streaming_model.pth"
 
     if not os.path.exists(checkpoint_path):
         print(f"❌ 模型文件不存在: {checkpoint_path}")

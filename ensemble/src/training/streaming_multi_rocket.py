@@ -43,17 +43,18 @@ class StreamingMultiRocketClassifier(nn.Module):
         self.confidence_threshold = confidence_threshold
         
         # 创建多个不同序列长度的backbone
-        self.backbones = nn.ModuleDict()
-        self.classifiers = nn.ModuleDict()
+        self.backbones = nn.ModuleList()
+        self.classifiers = nn.ModuleList()
 
         # 创建不同长度的模型
         self.supported_lengths = self._get_supported_lengths()
 
-        for seq_len in self.supported_lengths:
+        for seq_len in range(1, self.max_seq_len + 1):
             # 创建backbone
+            target_len = self._find_best_length(seq_len)
             backbone = MultiRocketBackbonePlus(
                 c_in=c_in,
-                seq_len=max(10, seq_len),
+                seq_len=target_len,
                 num_features=num_features,
                 **kwargs
             )
@@ -66,25 +67,21 @@ class StreamingMultiRocketClassifier(nn.Module):
                 nn.Linear(backbone_out_dim, c_out),
             )
             
-            self.backbones[str(seq_len)] = backbone
-            self.classifiers[str(seq_len)] = classifier
+            self.backbones.append(backbone)
+            self.classifiers.append(classifier)
 
     def _get_supported_lengths(self) -> List[int]:
         """获取支持的序列长度列表"""
         # 基于测试结果，HydraMultiRocket的最小工作长度是10
         # 但某些长度（如25）可能有问题，需要测试验证
         lengths = []
-        current = 1
+        current = 10
 
         # 测试每个长度是否可用
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         while current <= self.max_seq_len:
             # 测试这个长度是否可用
-            if current < 10:
-                lengths.append(current)
-                current += 1
-                continue
             try:
                 test_model = MultiRocketBackbonePlus(
                     c_in=self.c_in,
@@ -149,8 +146,8 @@ class StreamingMultiRocketClassifier(nn.Module):
             # 使用最后一个时间步进行padding
             padding = x[:, :, -1:].repeat(1, 1, target_len - x.shape[2])
             x = torch.cat([x, padding], dim=2)
-        features = self.backbones[str(target_len)](x)
-        logits = self.classifiers[str(target_len)](features)
+        features = self.backbones[seq_len - 1](x)
+        logits = self.classifiers[seq_len - 1](features)
         
         # 计算置信度
         probs = F.softmax(logits, dim=1)
@@ -271,7 +268,8 @@ class StreamingTrainer:
         optimizer.zero_grad()
         
         # 计算渐进式损失
-        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels)
+        length_weights = {k: 1 / self.model.max_seq_len for k in range(1, self.model.max_seq_len + 1)}
+        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels, length_weights)
         
         # 反向传播
         loss.backward()
@@ -287,7 +285,8 @@ class StreamingTrainer:
     def evaluate_step(self,
                  sequences: torch.Tensor,
                  labels: torch.Tensor) -> Dict[str, float]:
-        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels)
+        length_weights = {k: 1 / self.model.max_seq_len for k in range(1, self.model.max_seq_len + 1)}
+        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels, length_weights)
         return {
             'loss': loss.item(),
             'corrects': corrects,

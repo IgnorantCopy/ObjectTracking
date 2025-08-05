@@ -9,6 +9,7 @@ current_dir = Path(__file__).parent
 project_root = current_dir.parent.parent  # 回到项目根目录
 sys.path.append(str(project_root))
 
+import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
@@ -20,9 +21,23 @@ from ensemble.src.training.data_loader import TrajectoryDataLoader
 from ensemble.src.training.streaming_config import StreamingConfig
 
 
-def train_and_evaluate_streaming_model(config: StreamingConfig):
-    """训练和评估流式模型"""
+def get_data_loader(config: StreamingConfig):
+    """获取数据加载器"""
+    # 数据加载
+    print("\nLoading data...")
+    return TrajectoryDataLoader(
+        batch_size=config.batch_size,
+        train_split=config.train_split,
+        val_split=config.val_split,
+        test_split=config.test_split,
+        shuffle=config.shuffle,
+        num_workers=0,
+        random_state=config.seed
+    )
 
+
+def train_and_evaluate_streaming_model(config: StreamingConfig, data_loader: TrajectoryDataLoader, alpha: float, idx: int):
+    """训练和评估流式模型"""
     print("Starting Streaming MultiRocket Model Training")
     print("=" * 60)
 
@@ -37,26 +52,15 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
     save_dir = Path(config.save_dir)
     save_dir.mkdir(exist_ok=True)
 
-    # 数据加载
-    print("\\nLoading data...")
-    data_loader = TrajectoryDataLoader(
-        batch_size=config.batch_size,
-        train_split=config.train_split,
-        val_split=config.val_split,
-        test_split=config.test_split,
-        shuffle=config.shuffle,
-        num_workers=0,
-        random_state=config.seed
-    )
-
     data_info = data_loader.get_data_info()
     print("Data loaded successfully:")
+    print(data_info['seq_len'])
     for key, value in data_info.items():
         print(f"  {key}: {value}")
 
 
     # 模型创建
-    print("\\nCreating streaming model...")
+    print("\nCreating streaming model...")
     model = StreamingMultiRocketClassifier(
         c_in=data_info['num_features'],
         c_out=data_info['num_classes'],
@@ -74,25 +78,29 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
 
     # 训练设置
     trainer = StreamingTrainer(model, device)
-    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    params = [
+        {'params': model.backbones.parameters(), 'lr': config.learning_rate, 'weight_decay': config.weight_decay},
+        {'params': model.classifiers.parameters(), 'lr': config.learning_rate, 'weight_decay': alpha},
+    ]
+    optimizer = optim.Adam(params)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     train_loader, val_loader, test_loader = data_loader.get_dataloaders()
 
     # 训练历史
-    log_dir = os.path.join(save_dir, "logs")
+    log_dir = os.path.join(save_dir, str(idx), "logs")
     os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=log_dir)
 
     best_val_acc = 0.0
     patience_counter = 0
 
-    print(f"\\nStarting training ({config.epochs} epochs)...")
+    print(f"\nStarting training ({config.epochs} epochs)...")
     print("=" * 60)
 
     # 训练循环
     for epoch in range(config.epochs):
-        print(f"\\nEpoch {epoch + 1}/{config.epochs}")
+        print(f"\nEpoch {epoch + 1}/{config.epochs}")
 
         # 训练阶段
         model.train()
@@ -125,7 +133,6 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
             writer.add_scalar(f"train/acc_{i}", accuracies[i], epoch)
 
         # 验证阶段
-        print("Validating...")
         model.eval()
         with torch.no_grad():
             val_metrics = {
@@ -176,7 +183,7 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
                 'config': config,
                 'data_info': data_info,
                 'supported_lengths': model.supported_lengths
-            }, os.path.join(save_dir, 'best_streaming_model.pth'))
+            }, os.path.join(save_dir, str(idx), 'best_streaming_model.pth'))
 
             print(f"  Best model saved (acc: {val_avg_acc:.4f})")
         else:
@@ -193,7 +200,7 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
     print("Final testing...")
 
     # 加载最佳模型
-    best_model_path = os.path.join(save_dir, 'best_streaming_model.pth')
+    best_model_path = os.path.join(save_dir, str(idx), 'best_streaming_model.pth')
     if os.path.exists(best_model_path):
         checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -223,12 +230,13 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
     print(f"  Avg Begin Time: {test_avg_begin_time:.1f}")
 
     # save scaler
-    scaler_path = os.path.join(save_dir, 'data_scaler.pth')
+    scaler_path = os.path.join(save_dir, str(idx), 'data_scaler.pth')
     data_loader.save_scaler(scaler_path)
 
-    print("\\nTraining completed!")
+    print("\nTraining completed!")
     print("Files saved:")
-    print("  - checkpoints/best_streaming_model.pth")
+    print(f"  - checkpoints/{idx}/best_streaming_model.pth")
+    return best_val_acc
 
 
 def main():
@@ -244,9 +252,21 @@ def main():
     print(f"  Batch Size: {config.batch_size}")
     print(f"  Learning Rate: {config.learning_rate}")
     print(f"  Confidence Threshold: {config.confidence_threshold}")
-    
+
+    data_loader = get_data_loader(config)
+
     # 训练和评估
-    train_and_evaluate_streaming_model(config)
+    alphas = np.logspace(-4, 2, 10)
+    best_acc = 0.
+    best_index = -1
+    for i, alpha in enumerate(alphas):
+        print(f"\nTraining with alpha={alpha}...")
+        best_val_acc = train_and_evaluate_streaming_model(config, data_loader, alpha, i)
+        if best_val_acc > best_acc:
+            best_acc = best_val_acc
+            best_index = i
+
+    print(f"\nBest alpha: {alphas[best_index]}, Best accuracy: {best_acc:.4f}, Best index: {best_index}")
 
 
 if __name__ == "__main__":
