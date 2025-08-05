@@ -50,7 +50,7 @@ def load_trained_model(checkpoint_path: str, device: str = 'auto'):
         num_features=getattr(config, 'num_features', 10_000),
         dropout=getattr(config, 'dropout', 0.2),
         # confidence_threshold=getattr(config, 'confidence_threshold', 0.9)
-        confidence_threshold=1.0
+        confidence_threshold=0.95
     ).to(device)
     
     # 加载权重
@@ -210,7 +210,7 @@ def comprehensive_model_evaluation(checkpoint_path: str):
     _, _, test_loader = data_loader.get_dataloaders()
     
     # 进行综合评估
-    evaluation_results = evaluate_streaming(model, test_loader, device, detailed_analysis=False)
+    evaluation_results = evaluate_streaming(model, test_loader, device, detailed_analysis=True)
     
     return evaluation_results
 
