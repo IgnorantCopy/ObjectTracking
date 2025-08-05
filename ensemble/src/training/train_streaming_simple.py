@@ -155,6 +155,7 @@ def train_and_evaluate_streaming_model(config: StreamingConfig):
             writer.add_scalar(f"val/acc_{i}", accuracies[i], epoch)
 
         # 更新学习率
+        writer.add_scalar("learning_rate", optimizer.param_groups[0]['lr'], epoch)
         scheduler.step(val_avg_acc)
 
         # 打印结果

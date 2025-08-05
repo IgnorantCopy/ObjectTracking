@@ -172,18 +172,9 @@ class StreamingMultiRocketClassifier(nn.Module):
         Returns:
             (predictions, confidence, should_stop)
         """
-        current_len = x.shape[2]
-        
-        # # 如果序列太短，返回低置信度
-        # if current_len < 10:  # HydraMultiRocket的最小要求是10
-        #     batch_size = x.shape[0]
-        #     predictions = torch.zeros(batch_size, dtype=torch.long, device=x.device)
-        #     confidence = torch.zeros(batch_size, device=x.device)
-        #     return predictions, confidence, False
-        
         # 获取预测结果
         with torch.no_grad():
-            output = self.forward(x, current_len)
+            output = self.forward(x)
             predictions = torch.argmax(output['logits'], dim=1)
             confidence = output['max_probability']
             
@@ -319,8 +310,6 @@ class StreamingInferenceEngine:
         """重置推理状态"""
         self.current_sequence = []
         self.predictions_history = []
-        self.confidence_history = []
-        self.final_prediction = None
         self.stopped_early = False
         self.stop_timestep = None
     
@@ -337,7 +326,19 @@ class StreamingInferenceEngine:
         # 添加到当前序列
         self.current_sequence.append(features)
         current_length = len(self.current_sequence)
-        
+
+        if self.stopped_early:
+            prediction = self.predictions_history[-1]
+            self.predictions_history.append(prediction)
+            return {
+                'current_length': current_length,
+                'prediction': prediction,
+                'should_stop': True,
+                'stopped_early': self.stopped_early,
+                'stop_timestep': self.stop_timestep,
+                'predictions_history': self.predictions_history.copy(),
+            }
+
         # 转换为tensor
         sequence_array = np.array(self.current_sequence).T  # (features, timesteps)
         sequence_tensor = torch.from_numpy(sequence_array).float().unsqueeze(0)  # (1, features, timesteps)
@@ -354,15 +355,13 @@ class StreamingInferenceEngine:
             
             # 记录历史
             self.predictions_history.append(prediction)
-            self.confidence_history.append(conf)
-            
+
             # 检查是否应该早期停止
-            if should_stop and not self.stopped_early and current_length >= self.model.min_seq_len:
+            if should_stop:
                 self.stopped_early = True
                 self.stop_timestep = current_length
-                self.final_prediction = prediction
-            
-            result = {
+
+            return {
                 'current_length': current_length,
                 'prediction': prediction,
                 'confidence': conf,
@@ -370,25 +369,20 @@ class StreamingInferenceEngine:
                 'stopped_early': self.stopped_early,
                 'stop_timestep': self.stop_timestep,
                 'predictions_history': self.predictions_history.copy(),
-                'confidence_history': self.confidence_history.copy()
             }
             
-            return result
-    
+
     def get_final_prediction(self) -> Dict[str, any]:
         """获取最终预测结果"""
-        if self.stopped_early:
-            return {
-                'prediction': self.final_prediction,
-                'confidence': self.confidence_history[self.stop_timestep - 1],
-                'stopped_at_timestep': self.stop_timestep,
-                'total_timesteps': len(self.current_sequence)
-            }
-        else:
-            # 使用最后的预测
-            return {
-                'prediction': self.predictions_history[-1] if self.predictions_history else None,
-                'confidence': self.confidence_history[-1] if self.confidence_history else 0.0,
-                'stopped_at_timestep': len(self.current_sequence),
-                'total_timesteps': len(self.current_sequence)
-            }
+        predictions = np.array(self.predictions_history)
+        unique, counts = np.unique(predictions, return_counts=True)
+        index = np.argmax(counts)
+        prediction = unique[index]
+        rate = len(predictions[predictions == prediction]) / len(predictions)
+
+        return {
+            'prediction': prediction,
+            'rate': rate,
+            'stop_timestep': self.stop_timestep if self.stopped_early else len(self.current_sequence),
+            'total_timesteps': len(self.current_sequence)
+        }

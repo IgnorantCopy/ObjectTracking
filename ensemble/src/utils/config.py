@@ -24,7 +24,7 @@ SAVE_DIR = "./processed_data"
 # 模型配置
 NUM_CLASSES = 4  # 只区分1-4类
 TOTAL_FEATURES_PER_TIMESTEP = len(FINAL_FEATURE_COLUMNS)
-SEQ_LEN = 20  # 序列长度，可根据数据调整
+SEQ_LEN = 29  # 序列长度，可根据数据调整
 ABNORMAL_BATCH_ID = [234, 1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
 # 异常值检测配置

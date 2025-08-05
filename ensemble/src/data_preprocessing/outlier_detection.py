@@ -23,28 +23,51 @@ class OutlierDetector:
         self.velocity_threshold = velocity_threshold
         self.doppler_threshold = doppler_threshold
         self.verbose = verbose
-    
-    def detect_outliers_zscore(self, series: pd.Series, threshold: float = None) -> pd.Series:
-        """使用Z-score检测异常值"""
+
+    def detect_outliers_zscore(self, series: pd.Series, window_size: int = 10, threshold: float = None) -> pd.Series:
+        """使用滑动窗口的在线Z-score检测异常值"""
+
         if threshold is None:
             threshold = self.outlier_threshold
-        
-        if len(series) <= 1:
-            return pd.Series([False] * len(series), index=series.index)
-        
-        z_scores = np.abs(zscore(series, nan_policy='omit'))
-        return pd.Series(z_scores > threshold, index=series.index)
+
+        outliers = pd.Series([False] * len(series), index=series.index)
+
+        for i in range(len(series)):
+            # 只使用当前点之前的窗口数据
+            start_idx = max(0, i - window_size)
+            window_data = series.iloc[start_idx:i + 1]
+
+            if len(window_data) >= 3:  # 需要足够的历史数据
+                window_mean = window_data.mean()
+                window_std = window_data.std()
+                if window_std > 1e-10:  # 避免除零
+                    z_score = abs((series.iloc[i] - window_mean) / window_std)
+                    outliers.iloc[i] = z_score > threshold
+
+        return outliers
+
+    @staticmethod
+    def detect_outliers_iqr(series: pd.Series, window_size: int = 20) -> pd.Series:
+        """使用滑动窗口的在线IQR检测异常值"""
+        outliers = pd.Series([False] * len(series), index=series.index)
+
+        for i in range(len(series)):
+            # 只使用当前点之前的窗口数据
+            start_idx = max(0, i - window_size)
+            window_data = series.iloc[start_idx:i + 1]
+            if len(window_data) >= 5:   # 需要足够的历史数据计算分位数
+                Q1 = window_data.quantile(0.25)
+                Q3 = window_data.quantile(0.75)
+                IQR = Q3 - Q1
+                if IQR > 1e-10:   # 避免数据过于相似
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    outliers.iloc[i] = (series.iloc[i] < lower_bound) or (series.iloc[i] > upper_bound)
+
+        return outliers
     
-    def detect_outliers_iqr(self, series: pd.Series) -> pd.Series:
-        """使用IQR方法检测异常值"""
-        Q1 = series.quantile(0.25)
-        Q3 = series.quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        return (series < lower_bound) | (series > upper_bound)
-    
-    def detect_velocity_outliers(self, series: pd.Series, threshold: float) -> pd.Series:
+    @staticmethod
+    def detect_velocity_outliers(series: pd.Series, threshold: float) -> pd.Series:
         """检测速度异常值（绝对值过大）"""
         return np.abs(series) > threshold
     
