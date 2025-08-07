@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tsai.models.MultiRocketPlus import MultiRocketBackbonePlus
+from tsai.models.MultiRocketPlus import MultiRocketPlus
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
@@ -43,32 +43,19 @@ class StreamingMultiRocketClassifier(nn.Module):
         self.confidence_threshold = confidence_threshold
         
         # 创建多个不同序列长度的backbone
-        self.backbones = nn.ModuleList()
-        self.classifiers = nn.ModuleList()
+        self.models = nn.ModuleList()
 
         # 创建不同长度的模型
         self.supported_lengths = self._get_supported_lengths()
 
         for seq_len in range(1, self.max_seq_len + 1):
-            # 创建backbone
             target_len = self._find_best_length(seq_len)
-            backbone = MultiRocketBackbonePlus(
-                c_in=c_in,
-                seq_len=target_len,
+            self.models.append(MultiRocketPlus(
+                c_in, c_out, target_len,
                 num_features=num_features,
+                fc_dropout=dropout,
                 **kwargs
-            )
-            backbone_out_dim = backbone.num_features
-            # 创建对应的分类头
-            classifier = nn.Sequential(
-                nn.Flatten(),
-                nn.BatchNorm1d(backbone_out_dim),
-                nn.Dropout(dropout),
-                nn.Linear(backbone_out_dim, c_out),
-            )
-            
-            self.backbones.append(backbone)
-            self.classifiers.append(classifier)
+            ))
 
     def _get_supported_lengths(self) -> List[int]:
         """获取支持的序列长度列表"""
@@ -83,13 +70,14 @@ class StreamingMultiRocketClassifier(nn.Module):
         while current <= self.max_seq_len:
             # 测试这个长度是否可用
             try:
-                test_model = MultiRocketBackbonePlus(
+                test_model = MultiRocketPlus(
                     c_in=self.c_in,
+                    c_out=self.c_out,
                     seq_len=current,
                     num_features=self.num_features,
                 )
                 test_model.to(device)
-                test_input = torch.randn(1, self.c_in, current, device=device)
+                test_input = torch.randn(2, self.c_in, current, device=device)
                 _ = test_model(test_input)
                 lengths.append(current)
                 del test_model, test_input  # 清理内存
@@ -101,8 +89,9 @@ class StreamingMultiRocketClassifier(nn.Module):
         while lengths[-1] < self.max_seq_len:
             current += 1
             try:
-                test_model = MultiRocketBackbonePlus(
+                test_model = MultiRocketPlus(
                     c_in=self.c_in,
+                    c_out=self.c_out,
                     seq_len=current,
                     num_features=self.num_features,
                 )
@@ -146,8 +135,7 @@ class StreamingMultiRocketClassifier(nn.Module):
             # 使用最后一个时间步进行padding
             padding = x[:, :, -1:].repeat(1, 1, target_len - x.shape[2])
             x = torch.cat([x, padding], dim=2)
-        features = self.backbones[seq_len - 1](x)
-        logits = self.classifiers[seq_len - 1](features)
+        logits = self.models[seq_len - 1](x)
         
         # 计算置信度
         probs = F.softmax(logits, dim=1)

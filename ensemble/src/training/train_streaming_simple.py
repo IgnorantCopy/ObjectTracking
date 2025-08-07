@@ -78,11 +78,7 @@ def train_and_evaluate_streaming_model(config: StreamingConfig, data_loader: Tra
 
     # 训练设置
     trainer = StreamingTrainer(model, device)
-    params = [
-        {'params': model.backbones.parameters(), 'lr': config.learning_rate, 'weight_decay': config.weight_decay},
-        {'params': model.classifiers.parameters(), 'lr': config.learning_rate, 'weight_decay': alpha},
-    ]
-    optimizer = optim.Adam(params)
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     train_loader, val_loader, test_loader = data_loader.get_dataloaders()
@@ -265,6 +261,7 @@ def main():
         if best_val_acc > best_acc:
             best_acc = best_val_acc
             best_index = i
+        break
 
     print(f"\nBest alpha: {alphas[best_index]}, Best accuracy: {best_acc:.4f}, Best index: {best_index}")
 

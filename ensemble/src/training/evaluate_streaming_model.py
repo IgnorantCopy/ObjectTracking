@@ -210,7 +210,7 @@ def comprehensive_model_evaluation(checkpoint_path: str):
     _, _, test_loader = data_loader.get_dataloaders()
     
     # 进行综合评估
-    evaluation_results = evaluate_streaming(model, test_loader, device, detailed_analysis=True)
+    evaluation_results = evaluate_streaming(model, test_loader, device, detailed_analysis=False)
     
     return evaluation_results
 
