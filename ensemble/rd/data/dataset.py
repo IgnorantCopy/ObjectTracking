@@ -2,12 +2,9 @@ import random
 import torch
 from torch.utils.data import Dataset
 
-
 from ensemble.rd.data.rd_preprocess import *
-from .track_preprocess import TrajectoryDataProcessor, process_df
 
 
-TOTAL_FEATURES_PER_TIMESTEP = 28
 ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
 
@@ -291,91 +288,6 @@ class RDMap(Dataset):
         image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
         labels = torch.tensor(labels, dtype=torch.long)
         return batch_files, point_indices, stacked_images, stacked_extra_features, stacked_missing_rate, image_masks, labels
-
-
-class FusedDataset(RDMap):
-    def __init__(self, batch_files: list[BatchFile], image_transform=None, track_transform=None,
-                 image_seq_len=180, track_seq_len=29):
-        super().__init__(batch_files, image_transform, track_transform, image_seq_len, track_seq_len)
-
-    def __getitem__(self, item):
-        # load rd map
-        batch_file, point_index, images, extra_features, missing_rate, image_mask, cls = super().__getitem__(item)
-        point_file = batch_file.point_file
-        track_file = batch_file.track_file
-
-        # load point and track data
-        merged_data = self._load_track_data(point_file, track_file)
-        if len(merged_data) == 0:
-            print('error')
-            return batch_file, None, None, None, None, None, None, cls
-        if merged_data.dtype != np.float32:
-            merged_data = merged_data.astype(np.float32)
-        if merged_data.shape[0] < self.track_seq_len:
-            merged_data = np.concatenate([
-                merged_data,
-                np.stack([
-                    merged_data[-1, :] for _ in range(self.track_seq_len - merged_data.shape[0])
-                ], axis=0)
-            ], axis=0)
-        elif merged_data.shape[0] > self.track_seq_len:
-            merged_data = merged_data[:self.track_seq_len]
-        assert merged_data.shape[0] == self.track_seq_len, f"点迹数量与预期不符: {merged_data.shape[0]}, {self.track_seq_len}"
-        if self.track_transform:
-            merged_data = self.track_transform(merged_data)
-
-        return batch_file, point_index, images, merged_data, extra_features, missing_rate, image_mask, cls
-
-    @staticmethod
-    def _load_track_data(point_filepath, track_filepath):
-        """
-        使用 polars 高效加载、合并数据并进行特征工程
-        :param point_filepath: 点迹文件路径
-        :param track_filepath: 航迹文件路径
-        :return: 合并和处理后的特征数据 (NumPy Array)
-        """
-        try:
-            # 1. 加载数据，并明确指定有表头
-            preprocessed_data = TrajectoryDataProcessor(point_filepath, track_filepath).get_processed_data()
-            df_point = pl.from_pandas(preprocessed_data['point_data'])
-            df_track = pl.from_pandas(preprocessed_data['track_data'])
-
-            # 2. 数据类型转换和合并
-            df = df_point.join(df_track, on=["时间", "批号"], how="left").sort("时间")
-
-            # 3. 特征工程
-            df_final_features = process_df(df)
-
-            return df_final_features.to_numpy(order='c').astype(np.float32)
-
-        except Exception as e:
-            print(f"处理文件时出错 {point_filepath}: {e}")
-            return None
-
-    @staticmethod
-    def collate_fn(batch):
-        batch_files, point_indices, stacked_images, stacked_track_features, stacked_extra_features, \
-            stacked_missing_rate, image_masks, labels = [], [], [], [], [], [], [], []
-        for (batch_file, point_index, images, track_features, extra_features, missing_rate, image_mask, cls) in batch:
-            if images is None:
-                continue
-            batch_files.append(batch_file)
-            point_indices.append(point_index)
-            stacked_images.append(images)
-            stacked_track_features.append(track_features)
-            stacked_extra_features.append(extra_features)
-            stacked_missing_rate.append(missing_rate)
-            image_masks.append(image_mask)
-            labels.append(cls)
-        point_indices = torch.from_numpy(np.stack(point_indices, axis=0))
-        stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
-        stacked_track_features = torch.from_numpy(np.stack(stacked_track_features, axis=0))
-        stacked_extra_features = torch.from_numpy(np.stack(stacked_extra_features, axis=0))
-        stacked_missing_rate = torch.from_numpy(np.stack(stacked_missing_rate, axis=0))
-        image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
-        labels = torch.tensor(labels, dtype=torch.long)
-        return batch_files, point_indices, stacked_images, stacked_track_features, stacked_extra_features, \
-                stacked_missing_rate, image_masks, labels
 
 
 if __name__ == '__main__':

@@ -184,5 +184,5 @@ ensemble/track_results/
 ensemble/logs/
 ensemble/LatestResults/
 ensemble/ckpt/
-ensemble/src/training/checkpoints/
-src/training/checkpoints/
+ensemble/track/checkpoints/
+ensemble/checkpoints/

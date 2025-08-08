@@ -7,15 +7,15 @@ import glob
 import numpy as np
 import pandas as pd
 import torch
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any
 from tqdm import tqdm
 
 from .data_loader import DataLoader
 from .outlier_detection import OutlierDetector
 from .feature_engineering import FeatureEngineering
-from ..utils.config import (
+from ensemble.track.configs.config import (
     DATA_ROOT, NUM_CLASSES, TOTAL_FEATURES_PER_TIMESTEP, SEQ_LEN,
-    ABNORMAL_BATCH_ID, FINAL_FEATURE_COLUMNS
+    ABNORMAL_BATCH_ID
 )
 
 

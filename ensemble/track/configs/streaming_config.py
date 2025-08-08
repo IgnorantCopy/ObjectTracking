@@ -32,7 +32,7 @@ class StreamingConfig:
     device: str = "auto"  # "auto", "cuda", "cpu"
     
     # 保存设置
-    save_dir: str = "checkpoints"
+    save_dir: str = "../checkpoints"
     save_best_only: bool = True
     
     # 日志设置

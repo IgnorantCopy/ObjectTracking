@@ -4,7 +4,10 @@
 import time
 import sys
 import os
+import re
+import glob
 from pathlib import Path
+from typing import Dict, Any
 
 # 添加项目根目录到路径
 current_dir = Path(__file__).parent
@@ -13,12 +16,14 @@ sys.path.append(str(project_root))
 
 import torch
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, classification_report
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from tqdm import tqdm
 
-from ensemble.src.training.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingInferenceEngine
-from ensemble.src.training.data_loader import TrajectoryDataLoader
+from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingInferenceEngine
+from data_loader import TrajectoryDataLoader
+from ensemble.track.configs.config import TRACK_COLUMNS, SEQ_LEN
 
 
 def load_trained_model(checkpoint_path: str, device: str = 'auto'):
@@ -74,35 +79,39 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
     streaming_results = {
         'predictions': [],
         'labels': [],
+        'batch_ids': [],
         'begin_time': [],
         'rates': [],
         'stop_timesteps': [],
         'inference_times': [],
         'timestep_predictions': []  # 每个时间步的预测历史
     }
-    
+    engine = StreamingInferenceEngine(model)
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(data_loader, desc="评估中")):
             sequences = batch['sequences'].to(device)  # (batch, seq_len, features)
+            sequences = sequences.transpose(1, 2)
             labels = batch['labels'].to(device)
-            
+            batch_ids = batch['batch_ids']
+            streaming_results['batch_ids'].extend(batch_ids)
+
             # 流式推理
             for i in range(sequences.shape[0]):
-                seq = sequences[i].cpu().numpy()  # (seq_len, features)
+                engine.reset()
+                seq = sequences[i]  # (features, seq_len)
                 true_label = labels[i].item()
-                
-                engine = StreamingInferenceEngine(model)
-                
+
                 start_time = time.time()
                 timestep_preds = []
-
                 # 逐步添加时间步
                 is_begin = False
-                for t in range(len(seq)):
-                    features = seq[t]
+                for t in range(1, seq.shape[1] + 1):
+                    features = seq[:, :t]
                     result = engine.add_timestep(features)
 
                     prediction = result['prediction']
+                    seq[-1, t - 1] = prediction
                     timestep_preds.append(prediction)
 
                     if true_label == prediction and not is_begin:
@@ -124,7 +133,6 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
                 streaming_results['stop_timesteps'].append(stop_step)
                 streaming_results['inference_times'].append(streaming_time)
                 streaming_results['timestep_predictions'].append(timestep_preds)
-            
 
     # 计算性能指标
     streaming_accuracies = []
@@ -132,7 +140,7 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
     labels = np.array(streaming_results['labels'])
     rates = np.array(streaming_results['rates'])
     timestep_predictions = np.array(streaming_results['timestep_predictions'])
-    for t in range(sequences.shape[1]):
+    for t in range(sequences.shape[2]):
         pred_t = timestep_predictions[:, t]
         streaming_accuracies.append(accuracy_score(labels, pred_t))
     avg_acc = 0
@@ -185,6 +193,27 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
     }
 
 
+def export_results(results: Dict[str, Any], output_path: str, data_root: str):
+    """导出结果"""
+    timestep_predictions = results['streaming_results']['timestep_predictions']
+    batch_ids = results['streaming_results']['batch_ids']
+    track_files = glob.glob(os.path.join(data_root, "航迹/Tracks_*.txt"))
+    for track_file in track_files:
+        match_result = re.match(r"Tracks_(\d+)_(\d+)\.txt", os.path.basename(track_file))
+        batch_id = match_result.group(1)
+        num_points = int(match_result.group(2))
+        if batch_id in batch_ids:
+            df = pd.read_csv(track_file, encoding='gbk', header=0, names=TRACK_COLUMNS)
+            timestep_prediction = timestep_predictions[batch_ids.index(batch_id)]
+            if num_points <= SEQ_LEN:
+                timestep_prediction = timestep_prediction[:num_points]
+            else:
+                timestep_prediction.extend([timestep_prediction[-1]] * (num_points - SEQ_LEN))
+            df['识别结果'] = np.array(timestep_prediction) + 1
+            df.to_csv(os.path.join(output_path, os.path.basename(track_file)), index=False, encoding='gbk')
+    print(f"✅ 结果导出成功: {output_path}")
+
+
 def comprehensive_model_evaluation(checkpoint_path: str):
     """综合模型评估"""
     print("🔍 综合模型评估")
@@ -198,12 +227,9 @@ def comprehensive_model_evaluation(checkpoint_path: str):
     print("\n加载测试数据...")
     data_loader = TrajectoryDataLoader(
         batch_size=64,
-        train_split=0.7,
-        val_split=0.15,
-        test_split=0.15,
         shuffle=False,
         num_workers=4,
-        pretrained_scaler=os.path.join(os.path.dirname(checkpoint_path), 'data_scaler.pth'),
+        test_only=False,
         random_state=42,
     )
 
@@ -221,14 +247,15 @@ def main():
     print("=" * 60)
     
     # 检查文件
-    checkpoint_path = "checkpoints/0/best_streaming_model.pth"
+    checkpoint_path = "checkpoints/best_streaming_model.pth"
 
     if not os.path.exists(checkpoint_path):
         print(f"❌ 模型文件不存在: {checkpoint_path}")
         print("请先运行训练脚本生成模型")
         return
     
-    comprehensive_model_evaluation(checkpoint_path)
+    result = comprehensive_model_evaluation(checkpoint_path)
+    # export_results(result, DATA_ROOT, DATA_ROOT)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from typing import Tuple, Optional, Dict, Any
 
-from src.data_preprocessing.preprocessor import TrajectoryPreprocessor
+from data.preprocessor import TrajectoryPreprocessor
 
 
 class TrajectoryDataset(Dataset):

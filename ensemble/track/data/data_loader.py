@@ -4,7 +4,7 @@
 import os
 import pandas as pd
 from typing import Optional, Tuple
-from ..utils.config import POINT_COLUMNS, TRACK_COLUMNS
+from ensemble.track.configs.config import POINT_COLUMNS, TRACK_COLUMNS
 
 
 class DataLoader:

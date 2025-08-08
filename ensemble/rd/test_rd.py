@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 import multiprocessing
 
-from utils import config
+from ..utils import config
 from data import dataset
 
 

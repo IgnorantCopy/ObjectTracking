@@ -5,8 +5,8 @@ import sys
 from pathlib import Path
 
 # 添加项目根目录到路径
-current_dir = Path(__file__).parent
-project_root = current_dir.parent.parent  # 回到项目根目录
+current_dir = Path(__file__)
+project_root = current_dir.parent  # 回到项目根目录
 sys.path.append(str(project_root))
 
 import torch
@@ -15,9 +15,9 @@ from torch.utils.tensorboard import SummaryWriter
 import os
 from tqdm import tqdm
 
-from src.training.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingTrainer
-from src.training.data_loader import TrajectoryDataLoader
-from src.training.streaming_config import StreamingConfig
+from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingTrainer
+from data_loader import TrajectoryDataLoader
+from ensemble.track.configs.streaming_config import StreamingConfig
 
 
 def get_data_loader(config: StreamingConfig):

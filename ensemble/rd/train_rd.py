@@ -11,9 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 import multiprocessing
 
-from utils import config, visualize
+from ..utils import config, visualize
 from data import dataset
-from utils.logger import Logger
+from ..utils.logger import Logger
 
 
 def config_parser():

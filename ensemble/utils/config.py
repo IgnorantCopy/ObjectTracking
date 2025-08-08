@@ -25,7 +25,7 @@ def get_config(config_path: str):
 
 def get_model(rd_model_config, channels, num_classes):
     if rd_model_config['name'] == "SwinTransformer":
-        from ensemble.models.swin import SwinTransformer3D
+        from ensemble.rd.models.swin import SwinTransformer3D
         patch_depth        = rd_model_config["patch_depth"]
         patch_height       = rd_model_config["patch_height"]
         patch_width        = rd_model_config["patch_width"]

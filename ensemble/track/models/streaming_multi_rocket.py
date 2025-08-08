@@ -4,9 +4,32 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tsai.models.MultiRocketPlus import MultiRocketPlus
+from tsai.models.MultiRocketPlus import MultiRocketBackbonePlus
 from typing import Dict, List, Optional, Tuple
 import numpy as np
+
+
+class MultiRocket(nn.Module):
+    def __init__(self, c_in: int,
+                 c_out: int,
+                 seq_len: int,
+                 num_features: int = 20_000,
+                 dropout: float = 0.2,
+                 **kwargs):
+        super().__init__()
+        self.backbone = MultiRocketBackbonePlus(c_in, seq_len, num_features=num_features, **kwargs)
+        backbone_out_features = self.backbone.num_features
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.BatchNorm1d(backbone_out_features),
+            nn.Dropout(dropout),
+            nn.Linear(backbone_out_features, c_out),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.backbone(x)
+        x = self.classifier(x)
+        return x
 
 
 class StreamingMultiRocketClassifier(nn.Module):
@@ -16,7 +39,6 @@ class StreamingMultiRocketClassifier(nn.Module):
                  c_in: int, 
                  c_out: int, 
                  max_seq_len: int, 
-                 # min_seq_len: int = 10,
                  num_features: int = 20_000,
                  dropout: float = 0.2,
                  confidence_threshold: float = 0.9,
@@ -28,8 +50,6 @@ class StreamingMultiRocketClassifier(nn.Module):
             c_in: 输入特征维度
             c_out: 输出类别数
             max_seq_len: 最大序列长度
-            min_seq_len: 最小序列长度（开始预测的长度）
-            confidence_threshold: 置信度阈值，超过此值可以早期停止
             **kwargs: 传递给backbone的其他参数
         """
         super().__init__()
@@ -37,7 +57,6 @@ class StreamingMultiRocketClassifier(nn.Module):
         self.c_in = c_in
         self.c_out = c_out
         self.max_seq_len = max_seq_len
-        # self.min_seq_len = min_seq_len
         self.num_features = num_features
         self.dropout = dropout
         self.confidence_threshold = confidence_threshold
@@ -50,17 +69,18 @@ class StreamingMultiRocketClassifier(nn.Module):
 
         for seq_len in range(1, self.max_seq_len + 1):
             target_len = self._find_best_length(seq_len)
-            self.models.append(MultiRocketPlus(
-                c_in, c_out, target_len,
+            self.models.append(MultiRocket(
+                c_in=c_in,
+                c_out=c_out,
+                seq_len=target_len,
                 num_features=num_features,
-                fc_dropout=dropout,
-                **kwargs
+                dropout=dropout,
+                **kwargs,
             ))
 
     def _get_supported_lengths(self) -> List[int]:
         """获取支持的序列长度列表"""
-        # 基于测试结果，HydraMultiRocket的最小工作长度是10
-        # 但某些长度（如25）可能有问题，需要测试验证
+        # MultiRocket的最小工作长度是 10
         lengths = []
         current = 10
 
@@ -70,14 +90,13 @@ class StreamingMultiRocketClassifier(nn.Module):
         while current <= self.max_seq_len:
             # 测试这个长度是否可用
             try:
-                test_model = MultiRocketPlus(
+                test_model = MultiRocketBackbonePlus(
                     c_in=self.c_in,
-                    c_out=self.c_out,
                     seq_len=current,
                     num_features=self.num_features,
                 )
                 test_model.to(device)
-                test_input = torch.randn(2, self.c_in, current, device=device)
+                test_input = torch.randn(1, self.c_in, current, device=device)
                 _ = test_model(test_input)
                 lengths.append(current)
                 del test_model, test_input  # 清理内存
@@ -89,9 +108,8 @@ class StreamingMultiRocketClassifier(nn.Module):
         while lengths[-1] < self.max_seq_len:
             current += 1
             try:
-                test_model = MultiRocketPlus(
+                test_model = MultiRocketBackbonePlus(
                     c_in=self.c_in,
-                    c_out=self.c_out,
                     seq_len=current,
                     num_features=self.num_features,
                 )
@@ -127,6 +145,8 @@ class StreamingMultiRocketClassifier(nn.Module):
         if seq_len < 10:
             temp = torch.zeros((batch_size, features, 10), dtype=x.dtype, device=x.device)
             temp[:, :, : seq_len] = x
+            temp[:, -2, seq_len:] = 1
+            temp[:, -1, :] = -1
             x = temp
             del temp
         target_len = self._find_best_length(seq_len)
@@ -135,8 +155,9 @@ class StreamingMultiRocketClassifier(nn.Module):
             # 使用最后一个时间步进行padding
             padding = x[:, :, -1:].repeat(1, 1, target_len - x.shape[2])
             x = torch.cat([x, padding], dim=2)
+            x[:, -2, -padding.shape[2]:] = 1
         logits = self.models[seq_len - 1](x)
-        
+
         # 计算置信度
         probs = F.softmax(logits, dim=1)
         max_probs = torch.max(probs, dim=1)[0]
@@ -176,32 +197,36 @@ class StreamingTrainer:
         self.model = model
         self.device = device
         
-    def compute_progressive_loss(self, 
-                                sequences: torch.Tensor, 
-                                labels: torch.Tensor,
-                                length_weights: Optional[Dict[int, float]] = None)\
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    def _compute_accuracy(self, predictions: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """计算准确率"""
+        corrects = torch.zeros((predictions.shape[1], self.model.c_out), dtype=torch.float32, device=self.device)
+        totals = torch.zeros((predictions.shape[1], self.model.c_out), dtype=torch.float32, device=self.device)
+        for i in range(predictions.shape[0]):
+            prediction = predictions[i]
+            label = labels[i].item()
+            for j in range(predictions.shape[1]):
+                pred = prediction[j].item()
+                corrects[j][label] += float(pred == label)
+                totals[j][label] += 1.0
+
+        return corrects, totals
+
+    def train_step(self, 
+                   sequences: torch.Tensor, 
+                   labels: torch.Tensor, 
+                   optimizers: List[torch.optim.Optimizer]) -> Dict[str, float]:
         """
-        计算渐进式损失：在不同序列长度下都计算损失
+        训练一步
         
-        Args:
-            sequences: 输入序列 (batch, features, seq_len)
-            labels: 标签
-            length_weights: 不同长度的权重
-            
         Returns:
-            总损失
+            训练指标字典
         """
-        if length_weights is None:
-            # 默认权重：长序列权重更高
-            length_weights = {length: np.log(length + 1) for length in range(1, self.model.max_seq_len + 1)}
-            # 归一化权重
-            total_weight = sum(length_weights.values())
-            length_weights = {k: v / total_weight for k, v in length_weights.items()}
-        
-        total_loss = 0.0
         batch_size, features, max_len = sequences.shape
 
+        for optimizer in optimizers:
+            optimizer.zero_grad()
+
+        losses = []
         predictions = []
         is_begin = [False for _ in range(batch_size)]
         begin_time = [max_len for _ in range(batch_size)]
@@ -215,9 +240,11 @@ class StreamingTrainer:
             output = self.model(x_length)
             logits = output['logits']
             # 计算分类损失
-            classification_loss = F.cross_entropy(logits, labels)
+            loss = F.cross_entropy(logits, labels)
             pred = torch.argmax(logits, dim=1)
             predictions.append(pred)
+            # 更新标签列
+            sequences[:, -1, length - 1] = pred.float()
             # 判断开始时间
             for i in range(batch_size):
                 if is_begin[i]:
@@ -225,58 +252,64 @@ class StreamingTrainer:
                 if pred[i] == labels[i]:
                     is_begin[i] = True
                     begin_time[i] = length
+            loss.backward()
+            optimizers[length - 1].step()
+            losses.append(loss.item())
 
-            # 加权
-            weight = length_weights.get(length, 1.0)
-            total_loss += weight * classification_loss
+        losses = torch.tensor(losses, device=self.device)
+        predictions = torch.stack(predictions, dim=1)   # (batch, timesteps)
+        begin_time = sum(begin_time)
+        corrects, totals = self._compute_accuracy(predictions, labels)
 
-        # 计算准确率
-        predictions = torch.stack(predictions, dim=1)
-        corrects = torch.tensor([0. for _ in range(self.model.c_out)], device=self.device)
-        totals = torch.tensor([0. for _ in range(self.model.c_out)], device=self.device)
-        for i in range(batch_size):
-            prediction = predictions[i]
-            counts = torch.bincount(prediction, minlength=self.model.c_out)
-            pred = counts.argmax().item()
-            label = labels[i].item()
-            corrects[label] += float(pred == label)
-            totals[label] += 1.0
-        return total_loss, corrects, totals, sum(begin_time)
-    
-    def train_step(self, 
-                   sequences: torch.Tensor, 
-                   labels: torch.Tensor, 
-                   optimizer: torch.optim.Optimizer) -> Dict[str, float]:
-        """
-        训练一步
-        
-        Returns:
-            训练指标字典
-        """
-        optimizer.zero_grad()
-        
-        # 计算渐进式损失
-        length_weights = {k: 1 / self.model.max_seq_len for k in range(1, self.model.max_seq_len + 1)}
-        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels, length_weights)
-        
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-        
         return {
-            'loss': loss.item(),
+            'loss': losses,
+            'predictions': predictions,
             'corrects': corrects,
             'totals': totals,
             'begin_time': begin_time
         }
 
     def evaluate_step(self,
-                 sequences: torch.Tensor,
-                 labels: torch.Tensor) -> Dict[str, float]:
-        length_weights = {k: 1 / self.model.max_seq_len for k in range(1, self.model.max_seq_len + 1)}
-        loss, corrects, totals, begin_time = self.compute_progressive_loss(sequences, labels, length_weights)
+                      sequences: torch.Tensor,
+                      labels: torch.Tensor,) -> Dict[str, float]:
+        batch_size, features, max_len = sequences.shape
+
+        losses = []
+        predictions = []
+        is_begin = [False for _ in range(batch_size)]
+        begin_time = [max_len for _ in range(batch_size)]
+        for length in range(1, self.model.max_seq_len + 1):
+            if length > max_len:
+                continue
+            else:
+                x_length = sequences[:, :, :length]
+
+            # 获取预测结果
+            output = self.model(x_length)
+            logits = output['logits']
+            # 计算分类损失
+            loss = F.cross_entropy(logits, labels)
+            pred = torch.argmax(logits, dim=1)
+            predictions.append(pred)
+            # 更新标签列
+            sequences[:, -1, length - 1] = pred.float()
+            # 判断开始时间
+            for i in range(batch_size):
+                if is_begin[i]:
+                    continue
+                if pred[i] == labels[i]:
+                    is_begin[i] = True
+                    begin_time[i] = length
+            losses.append(loss.item())
+
+        losses = torch.tensor(losses, device=self.device)
+        predictions = torch.stack(predictions, dim=1)
+        begin_time = sum(begin_time)
+        corrects, totals = self._compute_accuracy(predictions, labels)
+
         return {
-            'loss': loss.item(),
+            'loss': losses,
+            'predictions': predictions,
             'corrects': corrects,
             'totals': totals,
             'begin_time': begin_time
@@ -295,30 +328,27 @@ class StreamingInferenceEngine:
     
     def reset(self):
         """重置推理状态"""
-        self.current_sequence = []
         self.predictions_history = []
         self.stopped_early = False
         self.stop_timestep = None
     
-    def add_timestep(self, features: np.ndarray) -> Dict[str, any]:
+    def add_timestep(self, features: torch.Tensor) -> Dict[str, any]:
         """
         添加新的时间步
         
         Args:
-            features: 新时间步的特征 (feature_dim,)
+            features: (features, seq_len)
             
         Returns:
             当前预测结果字典
         """
         # 添加到当前序列
-        self.current_sequence.append(features)
-        current_length = len(self.current_sequence)
-
+        seq_len = features.shape[1]
         if self.stopped_early:
             prediction = self.predictions_history[-1]
             self.predictions_history.append(prediction)
             return {
-                'current_length': current_length,
+                'current_length': seq_len,
                 'prediction': prediction,
                 'should_stop': True,
                 'stopped_early': self.stopped_early,
@@ -327,8 +357,7 @@ class StreamingInferenceEngine:
             }
 
         # 转换为tensor
-        sequence_array = np.array(self.current_sequence).T  # (features, timesteps)
-        sequence_tensor = torch.from_numpy(sequence_array).float().unsqueeze(0)  # (1, features, timesteps)
+        sequence_tensor = features.unsqueeze(0)  # (1, features, timesteps)
         
         if torch.cuda.is_available():
             sequence_tensor = sequence_tensor.cuda()
@@ -346,10 +375,10 @@ class StreamingInferenceEngine:
             # 检查是否应该早期停止
             if should_stop:
                 self.stopped_early = True
-                self.stop_timestep = current_length
+                self.stop_timestep = seq_len
 
             return {
-                'current_length': current_length,
+                'current_length': seq_len,
                 'prediction': prediction,
                 'confidence': conf,
                 'should_stop': should_stop,
@@ -370,6 +399,6 @@ class StreamingInferenceEngine:
         return {
             'prediction': prediction,
             'rate': rate,
-            'stop_timestep': self.stop_timestep if self.stopped_early else len(self.current_sequence),
-            'total_timesteps': len(self.current_sequence)
+            'stop_timestep': self.stop_timestep if self.stopped_early else self.model.max_seq_len,
+            'total_timesteps': self.model.max_seq_len
         }

@@ -3,10 +3,7 @@
 """
 import numpy as np
 import pandas as pd
-from scipy.stats import zscore
-from scipy import interpolate
-from typing import Union
-from ..utils.config import OUTLIER_THRESHOLD, INTERPOLATION_METHOD, VELOCITY_THRESHOLD, DOPPLER_THRESHOLD
+from ensemble.track.configs.config import OUTLIER_THRESHOLD, INTERPOLATION_METHOD, VELOCITY_THRESHOLD, DOPPLER_THRESHOLD
 
 
 class OutlierDetector:

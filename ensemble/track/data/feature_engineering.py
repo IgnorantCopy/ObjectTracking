@@ -3,7 +3,7 @@
 """
 import pandas as pd
 import polars as pl
-from ..utils.config import FINAL_FEATURE_COLUMNS
+from ensemble.track.configs.config import FINAL_FEATURE_COLUMNS
 
 
 class FeatureEngineering:
