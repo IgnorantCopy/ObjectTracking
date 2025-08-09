@@ -8,6 +8,7 @@ from tsai.models.MultiRocketPlus import MultiRocketBackbonePlus
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
+from ..data.preprocessor import TrajectoryPreprocessor
 
 class MultiRocket(nn.Module):
     def __init__(self, c_in: int,
@@ -17,18 +18,34 @@ class MultiRocket(nn.Module):
                  dropout: float = 0.2,
                  **kwargs):
         super().__init__()
+        self.c_in = c_in
+        self.c_out = c_out
+        self.seq_len = seq_len
+        self.num_features = num_features
+        self.dropout = dropout
+
         self.backbone = MultiRocketBackbonePlus(c_in, seq_len, num_features=num_features, **kwargs)
         backbone_out_features = self.backbone.num_features
-        self.classifier = nn.Sequential(
+        self.fc = nn.Sequential(
             nn.Flatten(),
             nn.BatchNorm1d(backbone_out_features),
             nn.Dropout(dropout),
             nn.Linear(backbone_out_features, c_out),
         )
+        self.head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(c_out, c_out)
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, x: torch.Tensor, last_logits: torch.Tensor = None) -> torch.Tensor:
+        batch_size = x.shape[0]
         x = self.backbone(x)
-        x = self.classifier(x)
+        x = self.fc(x)
+        if last_logits is None:
+            last_logits = torch.ones((batch_size, self.c_out), dtype=x.dtype, device=x.device) / self.c_out
+        x = x + last_logits
+        x = self.head(x)
         return x
 
 
@@ -132,12 +149,13 @@ class StreamingMultiRocketClassifier(nn.Module):
         # 如果没找到，返回最大长度
         return self.supported_lengths[-1]
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor, last_logits: torch.Tensor = None) -> Dict[str, torch.Tensor]:
         """
         前向传播
         
         Args:
             x: 输入序列 (batch, features, seq_len)
+            last_logits: 上一时刻的预测结果 (batch, c_out)
         Returns:
             包含预测结果和置信度的字典
         """
@@ -152,11 +170,12 @@ class StreamingMultiRocketClassifier(nn.Module):
         target_len = self._find_best_length(seq_len)
         # 使用对应长度的模型进行预测
         if x.shape[2] < target_len:
-            # 使用最后一个时间步进行padding
-            padding = x[:, :, -1:].repeat(1, 1, target_len - x.shape[2])
-            x = torch.cat([x, padding], dim=2)
-            x[:, -2, -padding.shape[2]:] = 1
-        logits = self.models[seq_len - 1](x)
+            padding_data = []
+            for i in range(batch_size):
+                padding_data.append(TrajectoryPreprocessor.data_padding(x[i].cpu().numpy().T, target_len, N=4).T)
+            padding_data = torch.from_numpy(np.stack(padding_data, axis=0)).float().to(x.device)
+            x = torch.cat([x, padding_data], dim=2)
+        logits = self.models[seq_len - 1](x, last_logits)
 
         # 计算置信度
         probs = F.softmax(logits, dim=1)
@@ -168,26 +187,28 @@ class StreamingMultiRocketClassifier(nn.Module):
             'max_probability': max_probs,
         }
     
-    def predict_streaming(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict_streaming(self, x: torch.Tensor, last_logits: torch.Tensor = None) \
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         流式预测：给定当前序列，返回预测、置信度和是否应该早期停止
         
         Args:
             x: 当前序列 (batch, features, current_seq_len)
-            
+            last_logits: 上一时刻的预测结果 (batch, c_out)
         Returns:
             (predictions, confidence, should_stop)
         """
         # 获取预测结果
         with torch.no_grad():
-            output = self.forward(x)
-            predictions = torch.argmax(output['logits'], dim=1)
+            output = self.forward(x, last_logits)
+            logits = output['logits']
+            predictions = torch.argmax(logits, dim=1)
             confidence = output['max_probability']
             
             # 判断是否应该早期停止
             should_stop = confidence > self.confidence_threshold
         
-        return predictions, confidence, should_stop
+        return logits, predictions, confidence, should_stop
 
 
 class StreamingTrainer:
@@ -226,10 +247,12 @@ class StreamingTrainer:
         for optimizer in optimizers:
             optimizer.zero_grad()
 
+        total_loss = 0.0
         losses = []
         predictions = []
         is_begin = [False for _ in range(batch_size)]
         begin_time = [max_len for _ in range(batch_size)]
+        last_logits = torch.ones((batch_size, self.model.c_out), dtype=sequences.dtype, device=sequences.device) / self.model.c_out
         for length in range(1, self.model.max_seq_len + 1):
             if length > max_len:
                 continue
@@ -237,8 +260,9 @@ class StreamingTrainer:
                 x_length = sequences[:, :, :length]
 
             # 获取预测结果
-            output = self.model(x_length)
+            output = self.model(x_length, last_logits)
             logits = output['logits']
+            last_logits = logits
             # 计算分类损失
             loss = F.cross_entropy(logits, labels)
             pred = torch.argmax(logits, dim=1)
@@ -252,9 +276,12 @@ class StreamingTrainer:
                 if pred[i] == labels[i]:
                     is_begin[i] = True
                     begin_time[i] = length
-            loss.backward()
-            optimizers[length - 1].step()
+            total_loss += loss
             losses.append(loss.item())
+
+        total_loss.backward()
+        for optimizer in optimizers:
+            optimizer.step()
 
         losses = torch.tensor(losses, device=self.device)
         predictions = torch.stack(predictions, dim=1)   # (batch, timesteps)
@@ -329,6 +356,7 @@ class StreamingInferenceEngine:
     def reset(self):
         """重置推理状态"""
         self.predictions_history = []
+        self.last_logits = None
         self.stopped_early = False
         self.stop_timestep = None
     
@@ -364,7 +392,8 @@ class StreamingInferenceEngine:
         
         # 进行预测
         with torch.no_grad():
-            predictions, confidence, should_stop = self.model.predict_streaming(sequence_tensor)
+            logits, predictions, confidence, should_stop = self.model.predict_streaming(sequence_tensor, self.last_logits)
+            self.last_logits = logits
             
             prediction = predictions[0].item()
             conf = confidence[0].item()
@@ -386,7 +415,6 @@ class StreamingInferenceEngine:
                 'stop_timestep': self.stop_timestep,
                 'predictions_history': self.predictions_history.copy(),
             }
-            
 
     def get_final_prediction(self) -> Dict[str, any]:
         """获取最终预测结果"""

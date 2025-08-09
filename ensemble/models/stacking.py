@@ -8,7 +8,12 @@ class Stacking(nn.Module):
         super().__init__()
         self.rd_models = rd_models
         self.track_models = track_models
-        self.fc = nn.Linear((len(rd_models) + len(track_models)) * num_classes, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Linear((len(rd_models) + len(track_models)) * num_classes, 512),
+            nn.ReLU(),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, num_classes)
+        )
         self.softmax = nn.Softmax(dim=1)
         self.freeze()
 
@@ -21,7 +26,7 @@ class Stacking(nn.Module):
             output = model(track_features)
             outputs.append(output['logits'])
         outputs = torch.cat(outputs, dim=1).to(images.device)
-        outputs = self.fc(outputs)
+        outputs = self.classifier(outputs)
         outputs = self.softmax(outputs)
         return outputs
 

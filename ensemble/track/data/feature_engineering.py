@@ -112,7 +112,7 @@ class FeatureEngineering:
             ((pl.col("距离二阶差分").pow(2) + pl.col("方位二阶差分").pow(2) + pl.col("俯仰二阶差分").pow(2))
              .cum_sum() / pl.col("距离二阶差分").cum_count()).sqrt().alias("位置抖动指数"),
         )
-        
+
         # 选择最终特征
         df_final_features = df.select(FINAL_FEATURE_COLUMNS)
         

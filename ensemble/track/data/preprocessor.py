@@ -138,7 +138,81 @@ class TrajectoryPreprocessor:
         merged['类别'] = np.ones(len(merged)) * -1  # 类别列
 
         return merged
-            
+
+    @staticmethod
+    def data_padding(merged_data, track_seq_len, N=4):
+        """
+        对点迹数据进行智能填充，通过寻找历史相似模式
+        :param merged_data: 点迹数据 (NumPy Array)
+        :param track_seq_len: 目标长度
+        :param N: 用于模式匹配的行数,不超过6
+        :return: 填充后的完整数据
+        """
+        current_len = merged_data.shape[0]
+        padding_length = track_seq_len - current_len
+        reference_pattern = merged_data[-N:, :]  # shape: [N, features]
+
+        # 确定搜索范围
+        if current_len >= padding_length + 2 * N:
+            search_end = min(current_len - padding_length - N, current_len - 2 * N)
+        else:
+            search_end = current_len - 2 * N
+        search_end = max(0, search_end)
+
+        min_distance = float("inf")
+        best_start_idx = N + 1
+
+        # 遍历可能的起始位置
+
+        from scipy.spatial.distance import cosine
+
+        for start_idx in range(search_end):
+            if start_idx + N > current_len:
+                break
+            current_pattern = merged_data[
+                              start_idx: start_idx + N, :
+                              ]  # shape: [N, features]
+            total_distance = 0.0
+            for i in range(N):
+                row_distance_uc = np.sqrt(
+                    np.sum((reference_pattern[i] - current_pattern[i]) ** 2)
+                )
+                row_distance_cos = cosine(reference_pattern[i], current_pattern[i])
+                row_distance = (row_distance_uc + row_distance_cos) / 2
+                total_distance += row_distance
+            if total_distance < min_distance:
+                min_distance = total_distance
+                best_start_idx = start_idx + N + 1
+
+        padding_data_list = []
+        remaining_padding = padding_length
+        while remaining_padding > 0:
+            # 确定这次可以填充多少行
+            available_rows = current_len - best_start_idx
+            rows_to_add = min(remaining_padding, available_rows)
+
+            padding_segment = merged_data[best_start_idx: best_start_idx + rows_to_add, :]
+            padding_data_list.append(padding_segment)
+            remaining_padding -= rows_to_add
+
+            # 如果还需要更多数据，重新开始循环
+            if remaining_padding > 0 and available_rows < remaining_padding:
+                pass
+
+        # 合并所有填充数据
+        if padding_data_list:
+            padding_data = np.concatenate(padding_data_list, axis=0)
+            assert (
+                    padding_data.shape[0] == padding_length
+            ), f"填充数据行数不匹配: {padding_data.shape[0]}, 期望: {padding_length}"
+        else:
+            # 如果没有找到合适的模式，回退到重复最后一行
+            padding_data = np.stack(
+                [merged_data[-1, :] for _ in range(padding_length)], axis=0
+            )
+        padding_data[:, -2] = 1
+        return padding_data
+
     def _clean_data(self, data: pd.DataFrame, batch_id: str) -> pd.DataFrame:
         """
         清理数据中的异常值
@@ -226,11 +300,9 @@ class TrajectoryPreprocessor:
             sequence = np.zeros((self.seq_len, TOTAL_FEATURES_PER_TIMESTEP), dtype=np.float32)
             sequence[:len(feature_array)] = feature_array
             
-            # 用最后一个有效值填充剩余部分
-            if len(feature_array) > 0:
-                last_valid = feature_array[-1]
-                sequence[len(feature_array):] = last_valid
-                sequence[len(feature_array):, -2] = 1  # 标记为 padding
+            sequence[len(feature_array):, :] = self.data_padding(
+                feature_array, self.seq_len, N=4
+            )
         
         return sequence
     

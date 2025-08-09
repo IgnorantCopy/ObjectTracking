@@ -27,6 +27,8 @@ def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True, se
             random.shuffle(batch_file)
         train_batch_files.extend(batch_file[:train_nums[i]])
         val_batch_files.extend(batch_file[train_nums[i]:train_nums[i] + val_nums[i]])
+    random.shuffle(train_batch_files)
+    random.shuffle(val_batch_files)
     return train_batch_files, val_batch_files
 
 
