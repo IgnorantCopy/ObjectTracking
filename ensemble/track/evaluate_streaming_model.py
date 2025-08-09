@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingInferenceEngine
 from data_loader import TrajectoryDataLoader
-from ensemble.track.configs.config import TRACK_COLUMNS, SEQ_LEN
+from ensemble.track.configs.config import TRACK_COLUMNS, SEQ_LEN, DATA_ROOT
 
 
 def load_trained_model(checkpoint_path: str, device: str = 'auto'):
@@ -195,13 +195,14 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
 
 def export_results(results: Dict[str, Any], output_path: str, data_root: str):
     """导出结果"""
+    os.makedirs(output_path, exist_ok=True)
     timestep_predictions = results['streaming_results']['timestep_predictions']
     batch_ids = results['streaming_results']['batch_ids']
     track_files = glob.glob(os.path.join(data_root, "航迹/Tracks_*.txt"))
     for track_file in track_files:
-        match_result = re.match(r"Tracks_(\d+)_(\d+)\.txt", os.path.basename(track_file))
+        match_result = re.match(r"Tracks_(\d+)_(\d+)_(\d+)\.txt", os.path.basename(track_file))
         batch_id = match_result.group(1)
-        num_points = int(match_result.group(2))
+        num_points = int(match_result.group(3))
         if batch_id in batch_ids:
             df = pd.read_csv(track_file, encoding='gbk', header=0, names=TRACK_COLUMNS)
             timestep_prediction = timestep_predictions[batch_ids.index(batch_id)]
@@ -247,7 +248,7 @@ def main():
     print("=" * 60)
     
     # 检查文件
-    checkpoint_path = "checkpoints/best_streaming_model.pth"
+    checkpoint_path = "../checkpoints/best_streaming_model.pth"
 
     if not os.path.exists(checkpoint_path):
         print(f"❌ 模型文件不存在: {checkpoint_path}")
@@ -255,7 +256,7 @@ def main():
         return
     
     result = comprehensive_model_evaluation(checkpoint_path)
-    # export_results(result, DATA_ROOT, DATA_ROOT)
+    export_results(result, os.path.join(DATA_ROOT, "test_results"), DATA_ROOT)
 
 
 if __name__ == "__main__":

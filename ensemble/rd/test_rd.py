@@ -176,7 +176,7 @@ def main():
 
 
     num_classes -= 2    # exclude noise and unknown class
-    model = config.get_model(model_config, channels, num_classes)
+    model = config.get_rd_model(model_config, channels, num_classes)
 
     optimizer = config.get_optimizer(optimizer_config, model, lr)
     lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)

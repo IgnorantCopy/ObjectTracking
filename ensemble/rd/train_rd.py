@@ -424,12 +424,12 @@ def main():
 
     if phase == "pretrain":
         num_classes -= 2    # exclude noise and unknown class
-        model = config.get_model(model_config, channels, num_classes)
+        model = config.get_rd_model(model_config, channels, num_classes)
     elif phase == "train":
         if not pretrain:
             raise ValueError("Pretrain model is not provided.")
         pretrain_checkpoint = torch.load(pretrain)
-        model = config.get_model(model_config, channels, num_classes - 2)
+        model = config.get_rd_model(model_config, channels, num_classes - 2)
         model.load_state_dict(pretrain_checkpoint['state_dict'])
         model.head = nn.Linear(model.head.in_features, num_classes)
     else:

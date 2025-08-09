@@ -2,7 +2,7 @@ import random
 import torch
 from torch.utils.data import Dataset
 
-from ensemble.rd.data.rd_preprocess import *
+from ensemble.rd.data.preprocess import *
 
 
 ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]

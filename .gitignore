@@ -185,4 +185,5 @@ ensemble/logs/
 ensemble/LatestResults/
 ensemble/ckpt/
 ensemble/track/checkpoints/
+ensemble/rd/logs/
 ensemble/checkpoints/

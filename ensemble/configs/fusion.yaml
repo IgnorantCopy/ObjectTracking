@@ -1,4 +1,4 @@
-model:
+rd_model:
   name: SwinTransformer
   patch_depth: 4
   patch_height: 4
@@ -20,12 +20,24 @@ model:
   extra_features_dim: 3
 
 
+track_model:
+  name: MultiRocket
+  num_features: 10000
+  dropout: 0.2
+  confidence_threshold: 0.95
+
+
 data:
   data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集
   val_ratio: 0.2
   shuffle: True
   image_seq_len: 64
-  track_seq_len: 20
+  track_seq_len: 29
+  height: 32
+  width: 544
+  num_classes: 4
+  image_channels: 1
+  track_channels: 30
 
 
 train:
@@ -33,12 +45,7 @@ train:
   num_workers: 4
   num_epochs: 100
   lr: 0.01
-  height: 32
-  width: 544
-  num_classes: 6
-  channels: 1
   alpha: 0.5
-  threshold: 0.5
   lr_scheduler:
     name: ReduceLROnPlateau
     factor: 0.5

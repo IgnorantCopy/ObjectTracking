@@ -23,9 +23,16 @@ def get_config(config_path: str):
     return config["model"], config["data"], config["train"]
 
 
-def get_model(rd_model_config, channels, num_classes):
+def get_stacking_config(config_path: str):
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config["rd_model"], config["track_model"], config["data"], config["train"]
+
+
+def get_rd_model(rd_model_config, channels, num_classes):
     if rd_model_config['name'] == "SwinTransformer":
         from ensemble.rd.models.swin import SwinTransformer3D
+
         patch_depth        = rd_model_config["patch_depth"]
         patch_height       = rd_model_config["patch_height"]
         patch_width        = rd_model_config["patch_width"]
@@ -57,6 +64,28 @@ def get_model(rd_model_config, channels, num_classes):
                                   patch_norm=patch_norm, frozen_stages=frozen_stages)
     else:
         raise NotImplementedError(f"RD Model {rd_model_config['name']} not implemented")
+
+    return model
+
+
+def get_track_model(track_model_config, channels, num_classes, seq_len):
+    if track_model_config['name'] == "MultiRocket":
+        from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier
+
+        num_features         = track_model_config["num_features"]
+        dropout              = track_model_config["dropout"]
+        confidence_threshold = track_model_config["confidence_threshold"]
+
+        model = StreamingMultiRocketClassifier(
+            c_in=channels,
+            c_out=num_classes,
+            max_seq_len=seq_len,
+            num_features=num_features,
+            dropout=dropout,
+            confidence_threshold=confidence_threshold,
+        )
+    else:
+        raise NotImplementedError(f"Track Model {track_model_config['name']} not implemented")
 
     return model
 

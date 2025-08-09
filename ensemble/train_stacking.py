@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -14,8 +15,8 @@ import multiprocessing
 from utils import config, visualize
 from data import dataset
 from utils.logger import Logger
-from models.rocket import Rocket
 from models.stacking import Stacking
+from rd.data.dataset import split_train_val
 
 
 def config_parser():
@@ -32,7 +33,7 @@ def config_parser():
     return args
 
 
-def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
+def train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
     model.train()
     train_loss = 0.
     train_time = time.time()
@@ -51,18 +52,18 @@ def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, 
         label = label.to(device)
         optimizer.zero_grad()
 
-        track_features = track_features.squeeze(1)
         cls_loss = 0.
         begin_times = [track_seq_len for _ in range(len(image))]
         pred = []
         begin = [False for _ in range(len(image))]
-        for t in range(track_seq_len):
-            index_mask_t = (point_index <= t + 1)
+        for t in range(1, track_seq_len + 1):
+            index_mask_t = (point_index <= t)
             image_mask_t = image_mask * index_mask_t
-            track_features_t = track_features[:, :t+1, :]
-            track_features_t = scalers[t].transform(track_features_t.reshape(-1, track_features_t.shape[-1])).reshape(-1, t+1, track_features_t.shape[-1])
+            track_features_t = track_features[:, :t, :]
+            track_features_t = track_features_t.transpose(1, 2)
 
             image_mask_t = image_mask_t.to(device)
+            track_features_t = track_features_t.to(device)
 
             extra_features_t = []
             for j, mask in enumerate(image_mask_t):
@@ -72,18 +73,16 @@ def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, 
                 else:
                     extra_features_t.append(extra_features[j][:rd_t].mean(0))
             extra_features_t = torch.stack(extra_features_t).float().to(device)
-            missing_rate_t = missing_rate[:, t].float().to(device)
+            missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-            output_t = model(track_features_t, t + 1, image, extra_features_t, missing_rate_t, image_mask_t)
-            output_max_t, pred_t = output_t.max(1)
+            output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
+            _, pred_t = output_t.max(1)
 
             for j in range(len(pred_t)):
-                if not begin[j]:
-                    if output_max_t[j] > threshold:
-                        begin[j] = True
-                        begin_times[j] = t
-                    else:
-                        pred_t[j] = -1
+                if not begin[j] and pred_t[j] == label[j]:
+                    begin[j] = True
+                    begin_times[j] = t
+            track_features[:, t - 1, -1] = pred_t.float()
             pred.append(pred_t.cpu().tolist())
 
             cls_loss_t = criterion(output_t, label)
@@ -112,7 +111,7 @@ def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, 
             pred_label = unique_vals[counts.argmax()]
             rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
             train_avg_rate += rate
-            if pred_label == gt and rate > 0.9:
+            if pred_label == gt:
                 corrects[gt] += 1
             conf_mat[pred_label][gt] += 1
 
@@ -124,7 +123,7 @@ def train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, 
     return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, conf_mat
 
 
-def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn):
+def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
     model.eval()
     val_loss = 0.
     val_time = time.time()
@@ -142,19 +141,19 @@ def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_cla
             else:
                 image = image.float()
             label = label.to(device)
-            track_features = track_features.squeeze(1)
 
             cls_loss = 0.
             begin_times = [track_seq_len for _ in range(len(image))]
             pred = []
             begin = [False for _ in range(len(image))]
-            for t in range(track_seq_len):
-                index_mask_t = (point_index <= t + 1)
+            for t in range(1, track_seq_len + 1):
+                index_mask_t = (point_index <= t)
                 image_mask_t = image_mask * index_mask_t
-                track_features_t = track_features[:, :t+1, :]
-                track_features_t = scalers[t].transform(track_features_t.reshape(-1, track_features_t.shape[-1])).reshape(-1, t+1, track_features_t.shape[-1])
+                track_features_t = track_features[:, :t, :]
+                track_features_t = track_features_t.transpose(1, 2)
 
                 image_mask_t = image_mask_t.to(device)
+                track_features_t = track_features_t.to(device)
 
                 extra_features_t = []
                 for j, mask in enumerate(image_mask_t):
@@ -164,18 +163,16 @@ def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_cla
                     else:
                         extra_features_t.append(extra_features[j][:rd_t].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
-                missing_rate_t = missing_rate[:, t].float().to(device)
+                missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-                output_t = model(track_features_t, t + 1, image, extra_features_t, missing_rate_t, image_mask_t)
+                output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
                 output_max_t, pred_t = output_t.max(1)
 
                 for j in range(len(pred_t)):
-                    if not begin[j]:
-                        if output_max_t[j] > threshold:
-                            begin[j] = True
-                            begin_times[j] = t
-                        else:
-                            pred_t[j] = -1
+                    if not begin[j] and pred_t[j] == label[j]:
+                        begin[j] = True
+                        begin_times[j] = t
+                track_features[:, t - 1, -1] = pred_t.float()
                 pred.append(pred_t.cpu().tolist())
 
                 cls_loss_t = criterion(output_t, label)
@@ -202,7 +199,7 @@ def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_cla
                 pred_label = unique_vals[counts.argmax()]
                 rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
                 val_avg_rate += rate
-                if pred_label == gt and rate > 0.9:
+                if pred_label == gt:
                     corrects[gt] += 1
                 conf_mat[pred_label][gt] += 1
     val_acc = corrects.sum() / totals.sum()
@@ -214,13 +211,16 @@ def val(model, scalers, val_loader, criterion, alpha, threshold, device, num_cla
     return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, conf_mat
 
 
-def test(model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn):
-    logger.log("Start test on train set...")
-    model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
+def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn):
+    os.makedirs(result_path, exist_ok=True)
+
     model.eval()
-    with (torch.no_grad()):
-        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(train_loader), total=len(train_loader), desc="Test on train set"):
+    corrects = 0
+    totals = 0
+    avg_rate = 0.
+    with torch.no_grad():
+        for i, (batch_files, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
+                in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test"):
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()
@@ -230,10 +230,14 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
 
             pred = []
             begin = [False for _ in range(len(image))]
-            for t in range(track_seq_len):
-                index_mask_t = (point_index <= t + 1)
+            for t in range(1, track_seq_len + 1):
+                index_mask_t = (point_index <= t)
                 image_mask_t = image_mask * index_mask_t
+                track_features_t = track_features[:, :t, :]
+                track_features_t = track_features_t.transpose(1, 2)
+
                 image_mask_t = image_mask_t.to(device)
+                track_features_t = track_features_t.to(device)
 
                 extra_features_t = []
                 for j, mask in enumerate(image_mask_t):
@@ -243,137 +247,57 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, logg
                     else:
                         extra_features_t.append(extra_features[j][:rd_t].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
-                missing_rate_t = missing_rate[:, t].float().to(device)
+                missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
-                output_max_t, pred_t = output_t.max(1)
-                pred_copy = pred_t.clone()
-                pred_copy[output_max_t < threshold] = -1
+                output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
+                _, pred_t = output_t.max(1)
 
-                for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin[j]:
+                for j in range(len(pred_t)):
+                    if not begin[j] and pred_t[j] == label[j]:
                         begin[j] = True
-                    elif pred_copy[j] == -1 and begin[j]:
-                        pred_copy[j] = pred_t[j]
-                pred.append(pred_copy.cpu().tolist())
+                track_features[:, t - 1, -1] = pred_t.float()
+                pred.append(pred_t.cpu().tolist())
 
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
+                del output_t, pred_t, index_mask_t, image_mask_t
                 torch.cuda.empty_cache()
 
             pred = np.array(pred).T   # [batch_size, seq_len]
-            label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
-                batch_image_mask = image_mask[batch].cpu().numpy()
-                if len(rd_matrices) > len(batch_image_mask):
-                    rd_matrices = rd_matrices[:len(batch_image_mask)]
-                    ranges = ranges[:len(batch_image_mask)]
-                    velocities = velocities[:len(batch_image_mask)]
 
                 cls = batch_file.label
-                batch_pred = pred[batch]
-                batch_pred = batch_pred[batch_pred != -1]
+                timestep_prediction = pred[batch]
+                batch_pred = timestep_prediction[timestep_prediction != -1]
                 if len(batch_pred) == 0:
                     pred_label = -1
                 else:
                     unique_vals, counts = np.unique(batch_pred, return_counts=True)
                     pred_label = unique_vals[counts.argmax()]
+                rate = len(batch_pred[batch_pred == pred_label]) / len(batch_pred)
+                avg_rate += rate
+                if pred_label == cls - 1 and rate > 0.9:
+                    corrects += 1
+                totals += 1
 
-                for frame in range(len(batch_image_mask)):
-                    if not batch_image_mask[frame]:
-                        break
-                    frame_image = rd_matrices[frame]
-                    range_axis = ranges[frame]
-                    velocity_axis = velocities[frame]
+                # save result
+                track_file = batch_file.track_file
+                df = pd.read_csv(track_file, encoding='gbk', header=0)
+                num_points = int(os.path.basename(track_file).split("_")[-1].split(".")[0])
 
-                    if label[batch] == pred_label:
-                        file_dir = os.path.join(result_path, f"train/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                    else:
-                        file_dir = os.path.join(result_path, f"train/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                    os.makedirs(file_dir, exist_ok=True)
-
-                    visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
-                                                  pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
-                    visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
-                    print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
-
-    logger.log("Start test on val set...")
-    with torch.no_grad():
-        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(val_loader), total=len(val_loader), desc="Test on val set"):
-            image = image.to(device)
-            if use_flash_attn:
-                image = image.half()
-            else:
-                image = image.float()
-            label = label.to(device)
-
-            pred = []
-            begin = [False for _ in range(len(image))]
-            for t in tqdm(range(track_seq_len)):
-                index_mask_t = (point_index <= t + 1)
-                image_mask_t = image_mask * index_mask_t
-                image_mask_t = image_mask_t.to(device)
-
-                extra_features_t = []
-                for j, mask in enumerate(image_mask_t):
-                    extra_features_t.append(extra_features[j][:mask.float().sum().int()].mean(0))
-                extra_features_t = torch.stack(extra_features_t).float().to(device)
-                missing_rate_t = missing_rate[:, t].float().to(device)
-
-                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
-                output_max_t, pred_t = output_t.max(1)
-                pred_copy = pred_t.clone()
-                pred_copy[output_max_t < threshold] = -1
-
-                for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin[j]:
-                        begin[j] = True
-                    elif pred_copy[j] == -1 and begin[j]:
-                        pred_copy[j] = pred_t[j]
-                pred.append(pred_copy.cpu().tolist())
-
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
-                torch.cuda.empty_cache()
-
-            pred = np.array(pred).T   # [batch_size, seq_len]
-            label = label.cpu().numpy()
-            for batch in range(len(batch_files)):
-                batch_file = batch_files[batch]
-                rd_matrices, ranges, velocities = dataset.process_batch(batch_file)
-                batch_image_mask = image_mask[batch].cpu().numpy()
-                if len(rd_matrices) > len(batch_image_mask):
-                    rd_matrices = rd_matrices[:len(batch_image_mask)]
-                    ranges = ranges[:len(batch_image_mask)]
-                    velocities = velocities[:len(batch_image_mask)]
-
-                cls = batch_file.label
-                batch_pred = pred[batch]
-                batch_pred = batch_pred[batch_pred != -1]
-                if len(batch_pred) == 0:
-                    pred_label = -1
+                if num_points <= track_seq_len:
+                    timestep_prediction = timestep_prediction[:num_points]
                 else:
-                    unique_vals, counts = np.unique(batch_pred, return_counts=True)
-                    pred_label = unique_vals[counts.argmax()]
+                    timestep_prediction = np.concatenate([
+                        timestep_prediction,
+                        np.ones(num_points - track_seq_len, dtype=timestep_prediction.dtype) * timestep_prediction[-1]
+                    ])
+                df['识别结果'] = timestep_prediction + 1
+                df.to_csv(os.path.join(result_path, os.path.basename(track_file)), index=False, encoding='gbk')
 
-                for frame in range(len(batch_image_mask)):
-                    if not batch_image_mask[frame]:
-                        break
-                    frame_image = rd_matrices[frame]
-                    range_axis = ranges[frame]
-                    velocity_axis = velocities[frame]
+    acc = corrects / totals
+    avg_rate /= totals
 
-                    if label[batch] == pred_label:
-                        file_dir = os.path.join(result_path, f"val/correct/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                    else:
-                        file_dir = os.path.join(result_path, f"val/wrong/Label_{cls}/Batch_{batch_file.batch_num}/Frame_{frame + 1}")
-                    os.makedirs(file_dir, exist_ok=True)
-
-                    visualize.visualize_rd_matrix(frame_image, range_axis, velocity_axis, batch_file.batch_num,
-                                                  pred[batch] + 1, frame + 1, save_path=os.path.join(file_dir, "rd_map.png"))
-                    visualize.plot_3d_trajectory(batch_file.point_file, save_path=os.path.join(file_dir, "trajectory.png"))
-                    print(f"{file_dir}/rd_map.png and {file_dir}/trajectory.png saved.")
+    return acc, avg_rate
 
 
 def save_model(model, optimizer, lr_scheduler, epoch, best_acc, filename):
@@ -400,34 +324,33 @@ def main():
     config.check_paths(log_path)
     writer = SummaryWriter(log_dir=log_path)
     logger = Logger(os.path.join(log_path, "train.txt"))
-    model_config, data_config, train_config = config.get_config(config_path)
+    rd_model_config, track_model_config, data_config, train_config = config.get_stacking_config(config_path)
 
-    use_flash_attn = model_config['name'] in ['Vit', 'ViViT']
+    use_flash_attn = rd_model_config['name'] in ['Vit', 'ViViT']
 
-    data_root     = data_config['data_root']
-    val_ratio     = data_config['val_ratio']
-    shuffle       = data_config['shuffle']
-    image_seq_len = data_config['image_seq_len']
-    track_seq_len = data_config['track_seq_len']
+    data_root      = data_config['data_root']
+    val_ratio      = data_config['val_ratio']
+    shuffle        = data_config['shuffle']
+    image_seq_len  = data_config['image_seq_len']
+    track_seq_len  = data_config['track_seq_len']
+    height         = data_config['height']
+    width          = data_config['width']
+    num_classes    = data_config['num_classes']
+    image_channels = data_config['image_channels']
+    track_channels = data_config['track_channels']
     config.check_paths(data_root)
 
     batch_size       = train_config['batch_size']
     num_workers      = train_config['num_workers']
     epochs           = train_config['num_epochs']
     lr               = train_config['lr']
-    num_classes      = train_config['num_classes']
-    channels         = train_config['channels']
     alpha            = train_config['alpha']
-    threshold        = train_config['threshold']
-    height           = train_config['height']
-    width            = train_config['width']
     lr_config        = train_config['lr_scheduler']
     optimizer_config = train_config['optimizer']
     loss_config      = train_config['loss']
 
 
-    num_classes -= 2    # exclude noise and unknown class
-    rd_model = config.get_model(model_config, channels, num_classes)
+    rd_model = config.get_rd_model(rd_model_config, image_channels, num_classes)
     if rd_model_path:
         checkpoint = torch.load(rd_model_path, weights_only=False)
         rd_model.load_state_dict(checkpoint['state_dict'])
@@ -436,8 +359,14 @@ def main():
         rd_model.half()
     rd_model.to(device)
 
-    track_model = Rocket(track_model_path, track_seq_len)
-    model = Stacking([rd_model, track_model], num_classes)
+    track_model = config.get_track_model(track_model_config, track_channels, num_classes, track_seq_len)
+    if track_model_path:
+        checkpoint = torch.load(track_model_path, weights_only=False)
+        track_model.load_state_dict(checkpoint['model_state_dict'])
+        logger.log(f"Loaded checkpoint from {track_model_path}")
+    track_model.to(device)
+
+    model = Stacking([rd_model], [track_model], num_classes)
     optimizer = config.get_optimizer(optimizer_config, model, lr)
     lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
     criterion = config.get_criterion(loss_config)
@@ -458,14 +387,13 @@ def main():
         logger.log(f"Loaded checkpoint from {resume}")
     model.to(device)
 
-    train_transform, val_transform = config.get_transform(channels, height, width)
-    scalers = config.get_scaler(track_model_path, track_seq_len)
+    train_transform, val_transform = config.get_transform(image_channels, height, width)
 
-    train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
+    train_batch_files, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle)
     train_dataset = dataset.FusedDataset(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
-                                         track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+                                         track_seq_len=track_seq_len)
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                       track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+                                       track_seq_len=track_seq_len)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
                               collate_fn=dataset.FusedDataset.collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -476,7 +404,7 @@ def main():
         logger.log(f'-------------- Epoch {epoch + 1}/{epochs} --------------')
 
         train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, train_conf_mat = \
-            train(model, scalers, train_loader, optimizer, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
+            train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/avg_acc", train_acc, epoch)
@@ -493,7 +421,7 @@ def main():
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
         val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, val_conf_mat = \
-            val(model, scalers, val_loader, criterion, alpha, threshold, device, num_classes, track_seq_len, use_flash_attn)
+            val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/avg_acc", val_acc, epoch)
@@ -520,7 +448,19 @@ def main():
 
     if result_path:
         config.check_paths(result_path)
-        test(model, train_loader, val_loader, device, threshold, track_seq_len, logger, result_path, log_path, use_flash_attn)
+        logger.log(f"Testing on train set...")
+        model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
+
+        train_acc, train_avg_rate = test(model, train_loader, device, track_seq_len,
+                                         os.path.join(result_path, "train"), use_flash_attn)
+        logger.log(f"Train Accuracy: {train_acc:.3f}\n"
+                   f"Train Avg Rate: {train_avg_rate:.3f}")
+
+        logger.log(f"Testing on val set...")
+        val_acc, val_avg_rate = test(model, val_loader, device, track_seq_len,
+                                     os.path.join(result_path, "val"), use_flash_attn)
+        logger.log(f"Val Accuracy: {val_acc:.3f}\n"
+                   f"Val Avg Rate: {val_avg_rate:.3f}")
 
     logger.close()
     writer.close()
