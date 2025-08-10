@@ -8,14 +8,14 @@ from ensemble.rd.data.preprocess import *
 ABNORMAL_BATCH_ID = [1451, 1452, 1457, 1462, 1467, 1469, 1473, 1478, 1484, 1487, 1488, 1490, 1494, 1496, 1497, 1500]
 
 
-def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True, seed=42):
+def split_train_val(data_root: str, num_classes, val_ratio=0.2, shuffle=True, test_only=False, seed=42):
     np.random.seed(seed)
     label_nums = [0 for _ in range(num_classes)]
     batch_files_by_cls = [[] for _ in range(num_classes)]
-    batch_files = get_batch_file_list(data_root)
+    batch_files = get_batch_file_list(data_root, test_only)
     for batch_file in batch_files:
         cls = batch_file.label - 1
-        if cls < 0 or cls >= num_classes or batch_file.batch_num in ABNORMAL_BATCH_ID:
+        if cls >= num_classes or batch_file.batch_num in ABNORMAL_BATCH_ID:
             continue
         label_nums[cls] += 1
         batch_files_by_cls[cls].append(batch_file)

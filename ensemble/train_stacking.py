@@ -6,13 +6,11 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import transforms
 import multiprocessing
 
-from utils import config, visualize
+from utils import config
 from data import dataset
 from utils.logger import Logger
 from models.stacking import Stacking
@@ -33,14 +31,14 @@ def config_parser():
     return args
 
 
-def train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
+def train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn):
     model.train()
     train_loss = 0.
     train_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
     conf_mat = np.zeros((num_classes, num_classes))
-    train_max_begin_time = 0
+    train_avg_begin_time = 0
     train_avg_rate = 0.
     for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
             in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
@@ -52,10 +50,11 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
         label = label.to(device)
         optimizer.zero_grad()
 
-        cls_loss = 0.
+        loss = 0.
         begin_times = [track_seq_len for _ in range(len(image))]
         pred = []
         begin = [False for _ in range(len(image))]
+        last_logits = torch.ones((len(image), num_classes), dtype=torch.float32, device=device) / num_classes
         for t in range(1, track_seq_len + 1):
             index_mask_t = (point_index <= t)
             image_mask_t = image_mask * index_mask_t
@@ -75,7 +74,8 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             extra_features_t = torch.stack(extra_features_t).float().to(device)
             missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-            output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
+            output_t = model(track_features_t, last_logits, image, extra_features_t, missing_rate_t, image_mask_t)
+            last_logits = output_t
             _, pred_t = output_t.max(1)
 
             for j in range(len(pred_t)):
@@ -86,14 +86,11 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             pred.append(pred_t.cpu().tolist())
 
             cls_loss_t = criterion(output_t, label)
-            cls_loss += cls_loss_t
+            loss += cls_loss_t
 
-        cls_loss /= track_seq_len
+        loss /= track_seq_len
         begin_times = torch.tensor(begin_times, dtype=torch.float, device=device)
-        train_max_begin_time = max(train_max_begin_time, begin_times.max().item())
-        time_loss = nn.MSELoss()(begin_times, torch.zeros_like(begin_times))
-        time_loss /= track_seq_len ** 2
-        loss = alpha * cls_loss + (1 - alpha) * time_loss
+        train_avg_begin_time += begin_times.sum().item()
         loss.backward()
         optimizer.step()
         train_loss += loss.item()
@@ -111,26 +108,27 @@ def train(model, train_loader, optimizer, criterion, alpha, device, num_classes,
             pred_label = unique_vals[counts.argmax()]
             rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
             train_avg_rate += rate
-            if pred_label == gt:
+            if pred_label == gt and rate > 0.9:
                 corrects[gt] += 1
             conf_mat[pred_label][gt] += 1
 
     train_acc = corrects.sum() / totals.sum()
+    train_avg_begin_time /= totals.sum()
+    train_avg_rate /= totals.sum()
     totals[totals == 0] = 1
     train_accuracies = corrects / totals
     train_loss = train_loss / len(train_loader)
-    train_avg_rate /= len(train_loader) * track_seq_len
-    return train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, conf_mat
+    return train_accuracies, train_loss, train_acc, train_time, train_avg_begin_time, train_avg_rate, conf_mat
 
 
-def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn):
+def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_flash_attn):
     model.eval()
     val_loss = 0.
     val_time = time.time()
     totals = np.array([0. for _ in range(num_classes)])
     corrects = np.array([0. for _ in range(num_classes)])
     conf_mat = np.zeros((num_classes, num_classes))
-    val_max_begin_time = 0
+    val_avg_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
         for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
@@ -142,10 +140,11 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 image = image.float()
             label = label.to(device)
 
-            cls_loss = 0.
+            loss = 0.
             begin_times = [track_seq_len for _ in range(len(image))]
             pred = []
             begin = [False for _ in range(len(image))]
+            last_logits = torch.ones((len(image), num_classes), dtype=torch.float32, device=device) / num_classes
             for t in range(1, track_seq_len + 1):
                 index_mask_t = (point_index <= t)
                 image_mask_t = image_mask * index_mask_t
@@ -165,7 +164,8 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
                 missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-                output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
+                output_t = model(track_features_t, last_logits, image, extra_features_t, missing_rate_t, image_mask_t)
+                last_logits = output_t
                 output_max_t, pred_t = output_t.max(1)
 
                 for j in range(len(pred_t)):
@@ -176,14 +176,11 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 pred.append(pred_t.cpu().tolist())
 
                 cls_loss_t = criterion(output_t, label)
-                cls_loss += cls_loss_t
+                loss += cls_loss_t
 
-            cls_loss /= track_seq_len
+            loss /= track_seq_len
             begin_times = torch.tensor(begin_times)
-            val_max_begin_time = max(val_max_begin_time, begin_times.max().item())
-            time_loss = nn.MSELoss()(begin_times.float().to(device), torch.zeros_like(begin_times).float().to(device))
-            time_loss /= track_seq_len ** 2
-            loss = alpha * cls_loss + (1 - alpha) * time_loss
+            val_avg_begin_time += begin_times.sum().item()
             val_loss += loss.item()
 
             pred = np.array(pred).T   # [batch_size, seq_len]
@@ -199,19 +196,20 @@ def val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len,
                 pred_label = unique_vals[counts.argmax()]
                 rate = len(pred_j[pred_j == pred_label]) / len(pred_j)
                 val_avg_rate += rate
-                if pred_label == gt:
+                if pred_label == gt and rate > 0.9:
                     corrects[gt] += 1
                 conf_mat[pred_label][gt] += 1
     val_acc = corrects.sum() / totals.sum()
+    val_avg_rate /= totals.sum()
+    val_avg_begin_time /= totals.sum()
     totals[totals == 0] = 1
     val_accuracies = corrects / totals
     val_loss = val_loss / len(val_loader)
-    val_avg_rate /= len(val_loader) * track_seq_len
 
-    return val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, conf_mat
+    return val_accuracies, val_loss, val_acc, val_time, val_avg_begin_time, val_avg_rate, conf_mat
 
 
-def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn):
+def test(model, data_loader, device, num_classes, track_seq_len, result_path, use_flash_attn):
     os.makedirs(result_path, exist_ok=True)
 
     model.eval()
@@ -230,6 +228,7 @@ def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn)
 
             pred = []
             begin = [False for _ in range(len(image))]
+            last_logits = torch.ones((len(image), num_classes), dtype=torch.float32, device=device) / num_classes
             for t in range(1, track_seq_len + 1):
                 index_mask_t = (point_index <= t)
                 image_mask_t = image_mask * index_mask_t
@@ -249,7 +248,8 @@ def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn)
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
                 missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
-                output_t = model(track_features_t, image, extra_features_t, missing_rate_t, image_mask_t)
+                output_t = model(track_features_t, last_logits, image, extra_features_t, missing_rate_t, image_mask_t)
+                last_logits = output_t
                 _, pred_t = output_t.max(1)
 
                 for j in range(len(pred_t)):
@@ -344,7 +344,6 @@ def main():
     num_workers      = train_config['num_workers']
     epochs           = train_config['num_epochs']
     lr               = train_config['lr']
-    alpha            = train_config['alpha']
     lr_config        = train_config['lr_scheduler']
     optimizer_config = train_config['optimizer']
     loss_config      = train_config['loss']
@@ -404,16 +403,16 @@ def main():
         logger.log(f'-------------- Epoch {epoch + 1}/{epochs} --------------')
 
         train_accuracies, train_loss, train_acc, train_time, train_max_begin_time, train_avg_rate, train_conf_mat = \
-            train(model, train_loader, optimizer, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
+            train(model, train_loader, optimizer, criterion, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/avg_acc", train_acc, epoch)
-        writer.add_scalar("train/max_begin_time", train_max_begin_time, epoch)
+        writer.add_scalar("train/avg_begin_time", train_max_begin_time, epoch)
         writer.add_scalar("train/avg_rate", train_avg_rate, epoch)
         logger.log(f"Train Loss: {train_loss:.3f}\n"
                    f"Train Accuracy: {train_acc:.3f}\n"
                    f"Train Time: {time.time() - train_time:.3f}s\n"
-                   f"Train Max Begin Time: {train_max_begin_time}\n"
+                   f"Train Avg Begin Time: {train_max_begin_time}\n"
                    f"Train Avg Rate: {train_avg_rate:.3f}\n")
         if epoch % 10 == 0:
             logger.log(f"Confusion Matrix:\n{train_conf_mat}")
@@ -421,16 +420,16 @@ def main():
             writer.add_scalar(f"train/acc_{i}", acc, epoch)
 
         val_accuracies, val_loss, val_acc, val_time, val_max_begin_time, val_avg_rate, val_conf_mat = \
-            val(model, val_loader, criterion, alpha, device, num_classes, track_seq_len, use_flash_attn)
+            val(model, val_loader, criterion, device, num_classes, track_seq_len, use_flash_attn)
 
         writer.add_scalar("val/loss", val_loss, epoch)
         writer.add_scalar("val/avg_acc", val_acc, epoch)
-        writer.add_scalar("val/max_begin_time", val_max_begin_time, epoch)
+        writer.add_scalar("val/avg_begin_time", val_max_begin_time, epoch)
         writer.add_scalar("val/avg_rate", val_avg_rate, epoch)
         logger.log(f"Val Loss: {val_loss:.3f}\n"
                    f"Val Accuracy: {val_acc:.3f}\n"
                    f"Val Time: {time.time() - val_time:.3f}s\n"
-                   f"Val Max Begin Time: {val_max_begin_time}\n"
+                   f"Val Avg Begin Time: {val_max_begin_time}\n"
                    f"Val Avg Rate: {val_avg_rate:.3f}")
         if epoch % 10 == 0:
             logger.log(f"Confusion Matrix:\n{val_conf_mat}")
@@ -451,13 +450,13 @@ def main():
         logger.log(f"Testing on train set...")
         model.load_state_dict(torch.load(os.path.join(log_path, "best.pth"), weights_only=False)['state_dict'])
 
-        train_acc, train_avg_rate = test(model, train_loader, device, track_seq_len,
+        train_acc, train_avg_rate = test(model, train_loader, device, num_classes, track_seq_len,
                                          os.path.join(result_path, "train"), use_flash_attn)
         logger.log(f"Train Accuracy: {train_acc:.3f}\n"
                    f"Train Avg Rate: {train_avg_rate:.3f}")
 
         logger.log(f"Testing on val set...")
-        val_acc, val_avg_rate = test(model, val_loader, device, track_seq_len,
+        val_acc, val_avg_rate = test(model, val_loader, device, num_classes, track_seq_len,
                                      os.path.join(result_path, "val"), use_flash_attn)
         logger.log(f"Val Accuracy: {val_acc:.3f}\n"
                    f"Val Avg Rate: {val_avg_rate:.3f}")

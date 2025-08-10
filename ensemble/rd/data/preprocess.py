@@ -674,7 +674,7 @@ def process_batch(batch: BatchFile):
     return rd_matrices, ranges, velocities, missing_rates
 
 
-def get_batch_file_list(root_dir: str):
+def get_batch_file_list(root_dir: str, test: bool = False):
     """
     获取批量处理文件列表
     :param root_dir: 数据根目录
@@ -694,16 +694,21 @@ def get_batch_file_list(root_dir: str):
             continue
 
         # 解析文件名
-        match = re.match(r'^(\d+)_Label_(\d+)\.dat$', raw_file)
+        pattern = r'^(\d+)\.dat$' if test else r'^(\d+)_Label_(\d+)\.dat$'
+        match = re.match(pattern, raw_file)
         if not match:
             continue
 
         batch_num = int(match.group(1))
-        label = int(match.group(2))
+        label = 0 if test else int(match.group(2))
 
         # 查找对应的点迹和航迹文件
-        point_pattern = f'PointTracks_{batch_num}_{label}_*.txt'
-        track_pattern = f'Tracks_{batch_num}_{label}_*.txt'
+        if test:
+            point_pattern = f'PointTracks_{batch_num}_*.txt'
+            track_pattern = f'Tracks_{batch_num}_*.txt'
+        else:
+            point_pattern = f'PointTracks_{batch_num}_{label}_*.txt'
+            track_pattern = f'Tracks_{batch_num}_{label}_*.txt'
 
         point_files = list(Path(point_dir).glob(point_pattern))
         track_files = list(Path(track_dir).glob(track_pattern))

@@ -7,8 +7,9 @@ from ensemble.track.data.preprocessor import TrajectoryPreprocessor
 
 class FusedDataset(RDMap):
     def __init__(self, batch_files: list[BatchFile], image_transform=None, track_transform=None,
-                 image_seq_len=180, track_seq_len=29):
+                 image_seq_len=180, track_seq_len=29, test=False):
         super().__init__(batch_files, image_transform, track_transform, image_seq_len, track_seq_len)
+        self.test = test
 
     def __getitem__(self, item):
         # load rd map
@@ -34,7 +35,7 @@ class FusedDataset(RDMap):
         :param track_filepath: 航迹文件路径
         :return: 合并和处理后的特征数据 (NumPy Array)
         """
-        preprocessor = TrajectoryPreprocessor(seq_len=self.track_seq_len)
+        preprocessor = TrajectoryPreprocessor(seq_len=self.track_seq_len, test=self.test)
         preprocessed_data, _, _ = preprocessor.process_single_trajectory(point_filepath, track_filepath)
 
         return preprocessed_data
@@ -66,36 +67,27 @@ class FusedDataset(RDMap):
 
 
 if __name__ == '__main__':
+    import shutil
     from tqdm import tqdm
-    import glob
-    import re
-    import plotly.graph_objects as go
+    from ensemble.rd.data.dataset import split_train_val
 
-    data_root = "D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集"
-    point_files = glob.glob(os.path.join(data_root, "点迹/PointTracks_*.txt"))
-    missing = {i: [] for i in range(4)}
-    for point_file in tqdm(point_files):
-        match_result = re.match(r"PointTracks_(\d+)_(\d+)_(\d+).txt", os.path.basename(point_file))
+    data_root = r"D:\DataSets\挑战杯_揭榜挂帅_CQ-08赛题_数据集"
+    _, val_batch_files = split_train_val(data_root, 4)
+    save_path = os.path.join(data_root, "val_set")
+    point_dir = os.path.join(save_path, "点迹")
+    track_dir = os.path.join(save_path, "航迹")
+    raw_dir = os.path.join(save_path, "原始回波")
+    os.makedirs(point_dir, exist_ok=True)
+    os.makedirs(track_dir, exist_ok=True)
+    os.makedirs(raw_dir, exist_ok=True)
+
+    for batch_file in tqdm(val_batch_files):
+        point_file = batch_file.point_file
+        track_file = batch_file.track_file
+        raw_file = batch_file.raw_file
+        match_result = re.match(r"PointTracks_(\d+)_(\d+)_(\d+)\.txt", os.path.basename(point_file))
         batch_id = int(match_result.group(1))
-        label = int(match_result.group(2))
-        if label > 4:
-            continue
         num_points = int(match_result.group(3))
-        raw_file = os.path.join(data_root, f"原始回波/{batch_id}_Label_{label}.dat")
-        track_file = os.path.join(data_root, f"航迹/Tracks_{batch_id}_{label}_{num_points}.txt")
-        batch_file = BatchFile(batch_id, label, raw_file, point_file, track_file)
-        rd_matrices, ranges, velocities, missing_rates = process_batch(batch_file)
-        if rd_matrices is None or len(rd_matrices) == 0:
-            missing[label-1].append(1)
-        else:
-            missing[label-1].append(missing_rates[-1])
-    for k, v in missing.items():
-        fig = go.Figure(data=[go.Histogram(x=v, histnorm='probability', nbinsx=30)])
-        fig.update_layout(
-            title_text="缺失率分布",
-            xaxis_title_text="缺失率",
-            yaxis_title_text="占比",
-            bargap=0.2,
-            bargroupgap=0.1
-        )
-        fig.show()
+        shutil.copy(point_file, os.path.join(point_dir, f"PointTracks_{batch_id}_{num_points}.txt"))
+        shutil.copy(track_file, os.path.join(track_dir, f"Tracks_{batch_id}_{num_points}.txt"))
+        shutil.copy(raw_file, os.path.join(raw_dir, f"{batch_id}.dat"))

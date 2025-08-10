@@ -56,7 +56,7 @@ class TrajectoryPreprocessor:
             (特征序列, 标签, 批号) 或 None（如果处理失败）
         """
         # 从文件名提取信息
-        pattern = r"PointTracks_(\d+)_(\d+).txt" if self.test else r"PointTracks_(\d+)_(\d+)_(\d+).txt"
+        pattern = r"PointTracks_(\d+)_(\d+)\.txt" if self.test else r"PointTracks_(\d+)_(\d+)_(\d+)\.txt"
         re_result = re.match(pattern, os.path.basename(point_file))
         if not re_result:
             if self.verbose:

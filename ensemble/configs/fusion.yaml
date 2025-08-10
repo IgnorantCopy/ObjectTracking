@@ -45,7 +45,6 @@ train:
   num_workers: 4
   num_epochs: 100
   lr: 0.01
-  alpha: 0.5
   lr_scheduler:
     name: ReduceLROnPlateau
     factor: 0.5
