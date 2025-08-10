@@ -21,8 +21,10 @@ def config_parser():
     parser.add_argument("--config-path", type=str, default='./configs/fusion.yaml', help="path to config file")
     parser.add_argument("--log-path",    type=str, default="./logs",                help="path to log file")
     parser.add_argument("--device",      type=str, default="cuda",                  help="device to use", choices=["cuda", "cpu"])
-    parser.add_argument("--pretrained",  type=str, required=True,                   help="path to checkpoint file")
-    parser.add_argument("--result-path", type=str, required=True,                    help="path to store the result file")
+    parser.add_argument("--rd-model",    type=str, required=True,                   help="path to rd model")
+    parser.add_argument("--track-model", type=str, required=True,                   help="path to track model")
+    parser.add_argument("--stacking",    type=str, required=True,                   help="path to stacking model")
+    parser.add_argument("--result-path", type=str, required=True,                   help="path to store the result file")
     args = parser.parse_args()
     print(args)
     return args
@@ -32,7 +34,7 @@ def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn)
     os.makedirs(result_path, exist_ok=True)
     model.eval()
 
-    engine = InferenceEngine(model, confidence_threshold=1.0)
+    engine = InferenceEngine(model, confidence_threshold=0.95)
     corrects = 0
     corrects_strict = 0
     totals = 0
@@ -133,7 +135,9 @@ def main():
     args = config_parser()
     config_path      = args.config_path
     log_path         = args.log_path
-    pretrained       = args.pretrained
+    rd_model_path    = args.rd_model
+    track_model_path = args.track_model
+    stacking         = args.stacking
     device           = args.device if torch.cuda.is_available() else "cpu"
     result_path      = args.result_path
 
@@ -161,17 +165,25 @@ def main():
 
 
     rd_model = config.get_rd_model(rd_model_config, image_channels, num_classes)
+    if rd_model_path:
+        checkpoint = torch.load(rd_model_path, weights_only=False)
+        rd_model.load_state_dict(checkpoint['state_dict'])
+        logger.log(f"Loaded checkpoint from {rd_model_path}")
     rd_model.to(device)
 
     track_model = config.get_track_model(track_model_config, track_channels, num_classes, track_seq_len)
+    if track_model_path:
+        checkpoint = torch.load(track_model_path, weights_only=False)
+        track_model.load_state_dict(checkpoint['model_state_dict'])
+        logger.log(f"Loaded checkpoint from {track_model_path}")
     track_model.to(device)
 
     model = Stacking([rd_model], [track_model], num_classes)
 
-    if pretrained:
-        checkpoint = torch.load(pretrained, weights_only=False)
+    if stacking:
+        checkpoint = torch.load(stacking, weights_only=False)
         model.load_state_dict(checkpoint['state_dict'])
-        logger.log(f"Loaded checkpoint from {pretrained}")
+        logger.log(f"Loaded checkpoint from {stacking}")
     model.to(device)
 
     _, val_transform = config.get_transform(image_channels, height, width)
