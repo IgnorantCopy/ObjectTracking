@@ -43,46 +43,70 @@ def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn)
     avg_stop_time = 0.
     avg_rate = 0.
     with torch.no_grad():
-        for i, (batch_files, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test"):
+        for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test"):
+            batch_files = batch['batch_files']
+            point_index = batch['point_indices']
+            image = batch['images']
+            track_features = batch['track_features']
+            num_points_list = batch['num_points']
+            extra_features = batch['extra_features']
+            missing_rate = batch['missing_rate']
+            image_mask = batch['image_masks']
+            label = batch['labels']
+            fail = batch['fail']
+
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()
             else:
                 image = image.float()
             label = label.to(device)
+            image_index = -1
 
-            for batch in range(len(image)):
+            for j in range(len(track_features)):
                 engine.reset()
-                point_index_batch = point_index[batch]
-                image_batch = image[batch]
-                track_features_batch = track_features[batch]
-                extra_features_batch = extra_features[batch]
-                missing_rate_batch = missing_rate[batch]
-                image_mask_batch = image_mask[batch]
-                label_batch = label[batch]
-                batch_file = batch_files[batch]
+                batch_file = batch_files[j]
+                track_features_batch = track_features[j]
+                num_points_batch = num_points_list[j]
+                label_batch = label[j]
+                fail_batch = fail[j]
+                if not fail_batch:
+                    image_index += 1
+                    point_index_batch = point_index[image_index]
+                    image_batch = image[image_index]
+                    extra_features_batch = extra_features[image_index]
+                    missing_rate_batch = missing_rate[image_index]
+                    image_mask_batch = image_mask[image_index]
+                else:
+                    point_index_batch = None
+                    image_batch = None
+                    extra_features_batch = None
+                    missing_rate_batch = None
+                    image_mask_batch = None
 
                 start_time = time.time()
                 is_begin = False
                 timestep_prediction = []
                 for t in range(1, track_seq_len + 1):
-                    index_mask_t = (point_index_batch <= t)
-                    image_mask_t = image_mask_batch * index_mask_t
-                    track_features_t = track_features_batch[:t, :].T
+                    if not fail_batch:
+                        index_mask_t = (point_index_batch <= t)
+                        image_mask_t = image_mask_batch * index_mask_t
+                        image_mask_t = image_mask_t.to(device)
 
-                    image_mask_t = image_mask_t.to(device)
+                        rd_t = image_mask_t.float().sum().int()
+                        if rd_t == 0:
+                            extra_features_t = torch.tensor([0. for _ in range(extra_features_batch.shape[1])])
+                        else:
+                            extra_features_t = extra_features_batch[:rd_t].mean(0)
+                        extra_features_t = extra_features_t.float().to(device)
+                        missing_rate_t = missing_rate_batch[t - 1].float().to(device)
+
+                    track_features_t = track_features_batch[:t, :].T
                     track_features_t = track_features_t.to(device)
 
-                    rd_t = image_mask_t.float().sum().int()
-                    if rd_t == 0:
-                        extra_features_t = torch.tensor([0. for _ in range(extra_features_batch.shape[1])])
-                    else:
-                        extra_features_t = extra_features_batch[:rd_t].mean(0)
-                    extra_features_t = extra_features_t.float().to(device)
-                    missing_rate_t = missing_rate_batch[t - 1].float().to(device)
+                    result = engine.add_timestep(track_features_t, num_points_batch, image_batch,
+                                                 extra_features_t, missing_rate_t, image_mask_t)
 
-                    result = engine.add_timestep(track_features_t, image_batch, extra_features_t, missing_rate_t, image_mask_t)
                     prediction = result['prediction']
                     track_features_batch[t - 1, -1] = prediction
                     timestep_prediction.append(prediction)
@@ -110,12 +134,11 @@ def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn)
                 # save result
                 track_file = batch_file.track_file
                 df = pd.read_csv(track_file, encoding='gbk', header=0)
-                num_points = int(os.path.basename(track_file).split("_")[-1].split(".")[0])
 
-                if num_points <= track_seq_len:
-                    timestep_prediction = timestep_prediction[:num_points]
+                if num_points_batch <= track_seq_len:
+                    timestep_prediction = timestep_prediction[:num_points_batch]
                 else:
-                    timestep_prediction += [timestep_prediction[-1] for _ in range(num_points - track_seq_len)]
+                    timestep_prediction += [timestep_prediction[-1] for _ in range(num_points_batch - track_seq_len)]
                 df['识别结果'] = np.array(timestep_prediction) + 1
                 df.to_csv(os.path.join(result_path, os.path.basename(track_file)), index=False, encoding='gbk')
 
@@ -189,10 +212,13 @@ def main():
     _, val_transform = config.get_transform(image_channels, height, width)
 
     _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, False)
+
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
                                        track_seq_len=track_seq_len, test=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                             collate_fn=dataset.FusedDataset.collate_fn)
+
+    logger.log('-' * 50)
 
     val_acc, val_acc_strict, val_avg_streaming_time, val_avg_begin_time, val_avg_stop_time, val_avg_rate = \
         test(model, val_loader, device, track_seq_len, os.path.join(result_path, "航迹"), use_flash_attn)

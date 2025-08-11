@@ -18,7 +18,7 @@ FINAL_FEATURE_COLUMNS = [
 ]
 
 # 数据路径配置
-DATA_ROOT = r"D:\DataSets\挑战杯_揭榜挂帅_CQ-08赛题_数据集\val_set"
+DATA_ROOT = r"D:\DataSets\挑战杯_揭榜挂帅_CQ-08赛题_数据集"
 SAVE_DIR = "./processed_data"
 
 # 模型配置

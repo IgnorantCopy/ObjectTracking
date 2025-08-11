@@ -321,6 +321,7 @@ class TrajectoryPreprocessor:
         self.sequences = []
         self.labels = []
         self.batch_ids = []
+        self.num_points = []
         
         for point_file in tqdm(point_files, desc="处理轨迹数据"):
             pattern = r"PointTracks_(\d+)_(\d+).txt" if self.test else r"PointTracks_(\d+)_(\d+)_(\d+).txt"
@@ -347,6 +348,7 @@ class TrajectoryPreprocessor:
                 self.sequences.append(sequence)
                 self.labels.append(label_idx)
                 self.batch_ids.append(batch_id)
+                self.num_points.append(int(num_points))
                 success_count += 1
             else:
                 fail_count += 1
@@ -358,6 +360,7 @@ class TrajectoryPreprocessor:
             'sequences': np.array(self.sequences) if self.sequences else np.array([]),
             'labels': np.array(self.labels) if self.labels else np.array([]),
             'batch_ids': self.batch_ids,
+            'num_points': self.num_points,
             'success_count': success_count,
             'fail_count': fail_count
         }

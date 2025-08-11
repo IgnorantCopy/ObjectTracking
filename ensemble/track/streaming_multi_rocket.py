@@ -349,6 +349,7 @@ class StreamingInferenceEngine:
     def __init__(self, model: StreamingMultiRocketClassifier):
         self.model = model
         self.model.eval()
+        self.need_pred_score = True
         
         # 重置状态
         self.reset()
@@ -360,14 +361,14 @@ class StreamingInferenceEngine:
         self.stopped_early = False
         self.stop_timestep = None
         self.need_pred_score = True
-
+    
     def add_timestep(self, features: torch.Tensor, max_len: int) -> Dict[str, any]:
         """
         添加新的时间步
-
+        
         Args:
             features: (features, seq_len)
-
+            
         Returns:
             当前预测结果字典
         """
@@ -387,34 +388,33 @@ class StreamingInferenceEngine:
 
         # 转换为tensor
         sequence_tensor = features.unsqueeze(0)  # (1, features, timesteps)
-
+        
         if torch.cuda.is_available():
             sequence_tensor = sequence_tensor.cuda()
-
+        
         # 进行预测
         with torch.no_grad():
-            logits, predictions, confidence, should_stop = self.model.predict_streaming(sequence_tensor,
-                                                                                        self.last_logits)
+            logits, predictions, confidence, should_stop = self.model.predict_streaming(sequence_tensor, self.last_logits)
             self.last_logits = logits
-
+            
             prediction = predictions[0].item()
             conf = confidence[0].item()
-
+            
             # ==============
             # 进行强制早停判断
-            different_threshold = np.floor(max_len * 0.1)
+            different_threshold = np.floor(max_len*0.1)
             current_length = len(self.predictions_history)
-
+            
             # 添加当前预测到临时历史中进行分析
             temp_history = self.predictions_history + [prediction]
             modified_prediction = False
-
+            
             if current_length >= 10:
                 # 情况1：当前长度已经大于等于10
                 unique_classes, counts = np.unique(self.predictions_history, return_counts=True)
                 max_count = np.max(counts)
                 max_classes = unique_classes[counts == max_count]
-
+                
                 # 检查是否满足强制早停条件
                 if len(max_classes) == 1 and max_count > different_threshold:
                     # 最多的类别是唯一的，且个数超过阈值，强制早停
@@ -422,7 +422,7 @@ class StreamingInferenceEngine:
                     self.stop_timestep = seq_len
                     final_prediction = max_classes[0]
                     self.predictions_history.append(final_prediction)
-
+                    
                     return {
                         'current_length': seq_len,
                         'prediction': final_prediction,
@@ -435,25 +435,25 @@ class StreamingInferenceEngine:
                 else:
                     # 不满足强制早停条件，继续正常预测
                     self.predictions_history.append(prediction)
-
+                    
             else:
                 # 情况2：当前长度小于10
                 if len(self.predictions_history) > 0 and self.need_pred_score:
                     unique_classes, counts = np.unique(self.predictions_history, return_counts=True)
                     max_count = np.max(counts)
                     max_classes = unique_classes[counts == max_count]  # 当前的所有最多类别
-
+                    
                     # 统计加入当前prediction后的分布
                     temp_unique, temp_counts = np.unique(temp_history, return_counts=True)
-
+                    
                     # 计算所有非最多类别的总数
                     non_max_total = 0
                     for i, temp_class in enumerate(temp_unique):
                         # 最多只能有一个类别的最终的预测类别
                         # 因此其他相同数目的非最多类别全部计入总数内
-                        if temp_class != max_classes[0]:
+                        if temp_class != max_classes[0]: 
                             non_max_total += temp_counts[i]
-
+                    
                     # 检查非最多类别的总数是否超过阈值
                     if non_max_total > different_threshold:
                         # 非最多类别总数超过阈值，可能需要修改预测
@@ -469,19 +469,20 @@ class StreamingInferenceEngine:
                                 if current_max_class in temp_max_classes:
                                     selected_class = current_max_class
                                     break
-
+                            
                             # 如果当前最多类别在加入新预测后都不是最多的，选择第一个当前最多类别
                             if selected_class is None:
                                 selected_class = max_classes[0]
-
+                            
                             prediction = selected_class
                             modified_prediction = True
-
+                    
                     self.predictions_history.append(prediction)
-
+                    
                 else:
                     # 第一个预测，直接添加
                     self.predictions_history.append(prediction)
+
 
             # 检查是否应该早期停止
             if should_stop and not modified_prediction:

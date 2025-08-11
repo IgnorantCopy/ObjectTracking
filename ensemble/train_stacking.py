@@ -40,8 +40,15 @@ def train(model, train_loader, optimizer, criterion, device, num_classes, track_
     conf_mat = np.zeros((num_classes, num_classes))
     train_avg_begin_time = 0
     train_avg_rate = 0.
-    for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
-            in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
+    for i, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc="Training"):
+        point_index = batch['point_indices']
+        image = batch['images']
+        track_features = batch['track_features']
+        extra_features = batch['extra_features']
+        missing_rate = batch['missing_rate']
+        image_mask = batch['image_masks']
+        label = batch['labels']
+
         image = image.to(device)
         if use_flash_attn:
             image = image.half()
@@ -131,8 +138,15 @@ def val(model, val_loader, criterion, device, num_classes, track_seq_len, use_fl
     val_avg_begin_time = 0
     val_avg_rate = 0.
     with torch.no_grad():
-        for i, (_, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
+        for i, batch in tqdm(enumerate(val_loader), total=len(val_loader), desc="Validation"):
+            point_index = batch['point_indices']
+            image = batch['images']
+            track_features = batch['track_features']
+            extra_features = batch['extra_features']
+            missing_rate = batch['missing_rate']
+            image_mask = batch['image_masks']
+            label = batch['labels']
+
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()
@@ -217,8 +231,16 @@ def test(model, data_loader, device, num_classes, track_seq_len, result_path, us
     totals = 0
     avg_rate = 0.
     with torch.no_grad():
-        for i, (batch_files, point_index, image, track_features, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test"):
+        for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test"):
+            batch_files = batch['batch_files']
+            point_index = batch['point_indices']
+            image = batch['images']
+            track_features = batch['track_features']
+            extra_features = batch['extra_features']
+            missing_rate = batch['missing_rate']
+            image_mask = batch['image_masks']
+            label = batch['labels']
+
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()

@@ -18,15 +18,15 @@ class FusedDataset(RDMap):
         track_file = batch_file.track_file
 
         # load point and track data
-        merged_data = self._load_track_data(point_file, track_file)
+        merged_data, num_points = self._load_track_data(point_file, track_file)
         if len(merged_data) == 0:
-            return batch_file, None, None, None, None, None, None, cls
+            return batch_file, None, None, None, None, None, None, None, cls
         if merged_data.dtype != np.float32:
             merged_data = merged_data.astype(np.float32)
         if self.track_transform:
             merged_data = self.track_transform(merged_data)
 
-        return batch_file, point_index, images, merged_data, extra_features, missing_rate, image_mask, cls
+        return batch_file, point_index, images, merged_data, num_points, extra_features, missing_rate, image_mask, cls
 
     def _load_track_data(self, point_filepath, track_filepath):
         """
@@ -37,33 +37,48 @@ class FusedDataset(RDMap):
         """
         preprocessor = TrajectoryPreprocessor(seq_len=self.track_seq_len, test=self.test)
         preprocessed_data, _, _ = preprocessor.process_single_trajectory(point_filepath, track_filepath)
-
-        return preprocessed_data
+        num_points = os.path.basename(point_filepath).split('_')[-1].split('.')[0]
+        return preprocessed_data, int(num_points)
 
     @staticmethod
     def collate_fn(batch):
-        batch_files, point_indices, stacked_images, stacked_track_features, stacked_extra_features, \
-            stacked_missing_rate, image_masks, labels = [], [], [], [], [], [], [], []
-        for (batch_file, point_index, images, track_features, extra_features, missing_rate, image_mask, cls) in batch:
-            if images is None:
-                continue
+        batch_files, point_indices, stacked_images, stacked_track_features, stacked_num_points, \
+            stacked_extra_features, stacked_missing_rate, image_masks, labels, fail = [], [], [], [], [], [], [], [], [], []
+        for (batch_file, point_index, images, track_features, num_points, extra_features, missing_rate, image_mask, cls) in batch:
             batch_files.append(batch_file)
+            stacked_track_features.append(track_features)
+            stacked_num_points.append(num_points)
+            labels.append(cls)
+            if images is None:
+                fail.append(True)
+                continue
+            fail.append(False)
             point_indices.append(point_index)
             stacked_images.append(images)
-            stacked_track_features.append(track_features)
             stacked_extra_features.append(extra_features)
             stacked_missing_rate.append(missing_rate)
             image_masks.append(image_mask)
-            labels.append(cls)
         point_indices = torch.from_numpy(np.stack(point_indices, axis=0))
         stacked_images = torch.from_numpy(np.stack(stacked_images, axis=0))
         stacked_track_features = torch.from_numpy(np.stack(stacked_track_features, axis=0))
+        stacked_num_points = torch.tensor(stacked_num_points, dtype=torch.int)
         stacked_extra_features = torch.from_numpy(np.stack(stacked_extra_features, axis=0))
         stacked_missing_rate = torch.from_numpy(np.stack(stacked_missing_rate, axis=0))
         image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
         labels = torch.tensor(labels, dtype=torch.long)
-        return batch_files, point_indices, stacked_images, stacked_track_features, stacked_extra_features, \
-                stacked_missing_rate, image_masks, labels
+        fail = torch.tensor(fail, dtype=torch.bool)
+        return {
+            "batch_files": batch_files,
+            "point_indices": point_indices,
+            "images": stacked_images,
+            "track_features": stacked_track_features,
+            "num_points": stacked_num_points,
+            "extra_features": stacked_extra_features,
+            "missing_rate": stacked_missing_rate,
+            "image_masks": image_masks,
+            "labels": labels,
+            "fail": fail
+        }
 
 
 if __name__ == '__main__':

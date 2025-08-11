@@ -5,14 +5,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Dict, Any
 
 from data.preprocessor import TrajectoryPreprocessor
 
 
 class TrajectoryDataset(Dataset):
     """轨迹数据集类"""
-    def __init__(self, sequences: np.ndarray, labels: np.ndarray, batch_ids: Optional[np.ndarray] = None):
+    def __init__(self, sequences: np.ndarray, labels: np.ndarray, batch_ids: np.ndarray, num_points: np.ndarray):
         """
         初始化数据集
         
@@ -24,22 +24,18 @@ class TrajectoryDataset(Dataset):
         self.sequences = torch.from_numpy(sequences).float()
         self.labels = torch.from_numpy(labels).long()
         self.batch_ids = batch_ids
+        self.num_points = num_points
         
     def __len__(self):
         return len(self.sequences)
     
     def __getitem__(self, idx):
-        if self.batch_ids is not None:
-            return {
-                'sequences': self.sequences[idx],
-                'labels': self.labels[idx],
-                'batch_ids': self.batch_ids[idx]
-            }
-        else:
-            return {
-                'sequences': self.sequences[idx],
-                'labels': self.labels[idx]
-            }
+        return {
+            'sequences': self.sequences[idx],
+            'labels': self.labels[idx],
+            'batch_ids': self.batch_ids[idx],
+            'num_points': self.num_points[idx]
+        }
 
 
 class TrajectoryDataLoader:
@@ -101,6 +97,7 @@ class TrajectoryDataLoader:
         sequences = data['sequences']  # (N, seq_len, features)
         labels = data['labels']        # (N,)
         batch_ids = data['batch_ids']  # (N,)
+        num_points = data['num_points']  # (N,)
         
         # 记录数据信息
         self.data_info = {
@@ -122,7 +119,7 @@ class TrajectoryDataLoader:
         if self.test_only:
             print(f"\n测试模式，不进行数据分割")
             print(f"  测试集: {len(sequences)} 样本")
-            self.test_dataset = TrajectoryDataset(sequences, labels, batch_ids)
+            self.test_dataset = TrajectoryDataset(sequences, labels, batch_ids, num_points)
             self.test_loader = DataLoader(
                 self.test_dataset,
                 batch_size=self.batch_size,
@@ -131,8 +128,9 @@ class TrajectoryDataLoader:
                 pin_memory=torch.cuda.is_available()
             )
         else:
-            train_sequences, temp_sequences, train_labels, temp_labels, train_batch_ids, temp_batch_ids = train_test_split(
-                sequences, labels, batch_ids,
+            train_sequences, temp_sequences, train_labels, temp_labels, train_batch_ids, temp_batch_ids, \
+                train_num_points, temp_num_points = train_test_split(
+                sequences, labels, batch_ids, num_points,
                 test_size=(self.val_split + self.test_split),
                 random_state=self.random_state,
                 stratify=labels
@@ -141,8 +139,9 @@ class TrajectoryDataLoader:
             # 计算验证集和测试集的相对比例
             val_test_split = self.val_split / (self.val_split + self.test_split)
 
-            val_sequences, test_sequences, val_labels, test_labels, val_batch_ids, test_batch_ids = train_test_split(
-                temp_sequences, temp_labels, temp_batch_ids,
+            val_sequences, test_sequences, val_labels, test_labels, val_batch_ids, test_batch_ids, \
+                val_num_points, test_num_points = train_test_split(
+                temp_sequences, temp_labels, temp_batch_ids, temp_num_points,
                 test_size=(1 - val_test_split),
                 random_state=self.random_state,
                 stratify=temp_labels
@@ -154,9 +153,9 @@ class TrajectoryDataLoader:
             print(f"  测试集: {len(test_sequences)} 样本")
         
             # 创建数据集
-            self.train_dataset = TrajectoryDataset(train_sequences, train_labels, train_batch_ids)
-            self.val_dataset = TrajectoryDataset(val_sequences, val_labels, val_batch_ids)
-            self.test_dataset = TrajectoryDataset(test_sequences, test_labels, test_batch_ids)
+            self.train_dataset = TrajectoryDataset(train_sequences, train_labels, train_batch_ids, train_num_points)
+            self.val_dataset = TrajectoryDataset(val_sequences, val_labels, val_batch_ids, val_num_points)
+            self.test_dataset = TrajectoryDataset(test_sequences, test_labels, test_batch_ids, test_num_points)
 
             # 创建数据加载器
             self.train_loader = DataLoader(

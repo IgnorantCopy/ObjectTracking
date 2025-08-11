@@ -94,6 +94,7 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
             sequences = sequences.transpose(1, 2)
             labels = batch['labels'].to(device)
             batch_ids = batch['batch_ids']
+            num_points = batch['num_points']
             streaming_results['batch_ids'].extend(batch_ids)
 
             # 流式推理
@@ -108,7 +109,7 @@ def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
                 is_begin = False
                 for t in range(1, seq.shape[1] + 1):
                     features = seq[:, :t]
-                    result = engine.add_timestep(features)
+                    result = engine.add_timestep(features, num_points[i])
 
                     prediction = result['prediction']
                     seq[-1, t - 1] = prediction
