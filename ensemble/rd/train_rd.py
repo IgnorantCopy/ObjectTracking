@@ -19,12 +19,12 @@ from ..utils.logger import Logger
 def config_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-path", type=str, default='./configs/swin.yaml', help="path to config file")
-    parser.add_argument("--log-path",    type=str, default="./logs",               help="path to log file")
-    parser.add_argument("--resume",      type=str, default=None,                   help="path to checkpoint file")
-    parser.add_argument("--device",      type=str, default="cuda",                 help="device to use", choices=["cuda", "cpu"])
-    parser.add_argument("--phase",       type=str, default="pretrain",             help="train or pretrain", choices=["train", "pretrain"])
-    parser.add_argument("--pretrain",    type=str, default=None,                   help="path to the pretrain model")
-    parser.add_argument("--result-path", type=str, default=None,                   help="path to store the result file")
+    parser.add_argument("--log-path",    type=str, default="./logs",              help="path to log file")
+    parser.add_argument("--resume",      type=str, default=None,                  help="path to checkpoint file")
+    parser.add_argument("--device",      type=str, default="cuda",                help="device to use", choices=["cuda", "cpu"])
+    parser.add_argument("--phase",       type=str, default="pretrain",            help="train or pretrain", choices=["train", "pretrain"])
+    parser.add_argument("--pretrain",    type=str, default=None,                  help="path to the pretrain model")
+    parser.add_argument("--result-path", type=str, default=None,                  help="path to store the result file")
     args = parser.parse_args()
     print(args)
     return args

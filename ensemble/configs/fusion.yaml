@@ -28,7 +28,7 @@ track_model:
 
 
 data:
-  data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集
+  data_root: D:/DataSets/挑战杯_揭榜挂帅_CQ-08赛题_数据集/val_set
   val_ratio: 0.2
   shuffle: True
   image_seq_len: 64

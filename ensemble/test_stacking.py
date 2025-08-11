@@ -211,10 +211,10 @@ def main():
 
     _, val_transform = config.get_transform(image_channels, height, width)
 
-    _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, False)
+    _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, True)
 
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                       track_seq_len=track_seq_len, test=False)
+                                       track_seq_len=track_seq_len, test=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                             collate_fn=dataset.FusedDataset.collate_fn)
 
