@@ -2,12 +2,13 @@ import argparse
 import os
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
 import multiprocessing
 
-from ..utils import config
+from ensemble.utils import config
 from data import dataset
 
 
@@ -22,11 +23,21 @@ def config_parser():
     return args
 
 
-def test(model, train_loader, val_loader, device, threshold, track_seq_len, result_path, use_flash_attn):
+def test(model, data_loader, device, track_seq_len, result_path, use_flash_attn):
     model.eval()
+    corrects = 0
+    totals = 0
+    avg_rate = 0.
     with (torch.no_grad()):
-        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(train_loader), total=len(train_loader), desc="Test on train set"):
+        for i, batch in tqdm(enumerate(data_loader), total=len(data_loader), desc="Test on train set"):
+            batch_files = batch["batch_files"]
+            point_index = batch["point_indices"]
+            image = batch["images"]
+            extra_features = batch["extra_features"]
+            missing_rate = batch["missing_rate"]
+            image_mask = batch["image_masks"]
+            label = batch["labels"]
+
             image = image.to(device)
             if use_flash_attn:
                 image = image.half()
@@ -36,8 +47,8 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, resu
 
             pred = []
             begin = [False for _ in range(len(image))]
-            for t in range(track_seq_len):
-                index_mask_t = (point_index <= t + 1)
+            for t in range(1, track_seq_len + 1):
+                index_mask_t = (point_index <= t)
                 image_mask_t = image_mask * index_mask_t
                 image_mask_t = image_mask_t.to(device)
 
@@ -49,100 +60,54 @@ def test(model, train_loader, val_loader, device, threshold, track_seq_len, resu
                     else:
                         extra_features_t.append(extra_features[j][:rd_t].mean(0))
                 extra_features_t = torch.stack(extra_features_t).float().to(device)
-                missing_rate_t = missing_rate[:, t].float().to(device)
+                missing_rate_t = missing_rate[:, t - 1].float().to(device)
 
                 output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
-                output_max_t, pred_t = output_t.max(1)
-                pred_copy = pred_t.clone()
-                pred_copy[output_max_t < threshold] = -1
+                _, pred_t = output_t.max(1)
 
-                for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin[j]:
+                for j in range(len(pred_t)):
+                    if not begin[j] and pred_t[j] == label[j]:
                         begin[j] = True
-                    elif pred_copy[j] == -1 and begin[j]:
-                        pred_copy[j] = pred_t[j]
-                pred.append(pred_copy.cpu().tolist())
+                pred.append(pred_t.cpu().tolist())
 
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
+                del output_t, pred_t, index_mask_t, image_mask_t
                 torch.cuda.empty_cache()
 
             pred = np.array(pred).T   # [batch_size, seq_len]
-            label = label.cpu().numpy()
             for batch in range(len(batch_files)):
                 batch_file = batch_files[batch]
                 cls = batch_file.label
-                batch_pred = pred[batch]
-                batch_pred = batch_pred[batch_pred != -1]
+                timestep_prediction = pred[batch]
+                batch_pred = timestep_prediction[timestep_prediction != -1]
                 if len(batch_pred) == 0:
                     pred_label = -1
                 else:
                     unique_vals, counts = np.unique(batch_pred, return_counts=True)
                     pred_label = unique_vals[counts.argmax()]
+                rate = len(batch_pred[batch_pred == pred_label]) / len(batch_pred)
+                avg_rate += rate
+                if pred_label == cls - 1 and rate > 0.9:
+                    corrects += 1
+                totals += 1
 
-                if label[batch] == pred_label:
-                    file_dir = os.path.join(result_path, f"correct/Label_{cls}")
+                # save result
+                track_file = batch_file.track_file
+                df = pd.read_csv(track_file, encoding='gbk', header=0)
+                num_points = int(os.path.basename(track_file).split("_")[-1].split(".")[0])
+
+                if num_points <= track_seq_len:
+                    timestep_prediction = timestep_prediction[:num_points]
                 else:
-                    file_dir = os.path.join(result_path, f"wrong/Label_{cls}")
-                os.makedirs(file_dir, exist_ok=True)
-                np.savetxt(os.path.join(file_dir, f"Batch_{batch_file.batch_num}.txt"), pred[batch], fmt='%d')
+                    timestep_prediction = np.concatenate([
+                        timestep_prediction,
+                        np.ones(num_points - track_seq_len, dtype=timestep_prediction.dtype) * timestep_prediction[-1]
+                    ])
+                df['识别结果'] = timestep_prediction + 1
+                df.to_csv(os.path.join(result_path, os.path.basename(track_file)), index=False, encoding='gbk')
+    acc = corrects / totals
+    avg_rate /= totals
 
-    with torch.no_grad():
-        for i, (batch_files, point_index, image, extra_features, missing_rate, image_mask, label) \
-                in tqdm(enumerate(val_loader), total=len(val_loader), desc="Test on val set"):
-            image = image.to(device)
-            if use_flash_attn:
-                image = image.half()
-            else:
-                image = image.float()
-            label = label.to(device)
-
-            pred = []
-            begin = [False for _ in range(len(image))]
-            for t in tqdm(range(track_seq_len)):
-                index_mask_t = (point_index <= t + 1)
-                image_mask_t = image_mask * index_mask_t
-                image_mask_t = image_mask_t.to(device)
-
-                extra_features_t = []
-                for j, mask in enumerate(image_mask_t):
-                    extra_features_t.append(extra_features[j][:mask.float().sum().int()].mean(0))
-                extra_features_t = torch.stack(extra_features_t).float().to(device)
-                missing_rate_t = missing_rate[:, t].float().to(device)
-
-                output_t = model(image, extra_features_t, missing_rate_t, image_mask_t)
-                output_max_t, pred_t = output_t.max(1)
-                pred_copy = pred_t.clone()
-                pred_copy[output_max_t < threshold] = -1
-
-                for j in range(len(pred_copy)):
-                    if pred_copy[j] != -1 and not begin[j]:
-                        begin[j] = True
-                    elif pred_copy[j] == -1 and begin[j]:
-                        pred_copy[j] = pred_t[j]
-                pred.append(pred_copy.cpu().tolist())
-
-                del output_t, output_max_t, pred_t, pred_copy, index_mask_t, image_mask_t
-                torch.cuda.empty_cache()
-
-            pred = np.array(pred).T   # [batch_size, seq_len]
-            label = label.cpu().numpy()
-            for batch in range(len(batch_files)):
-                batch_file = batch_files[batch]
-                cls = batch_file.label
-                batch_pred = pred[batch]
-                batch_pred = batch_pred[batch_pred != -1]
-                if len(batch_pred) == 0:
-                    pred_label = -1
-                else:
-                    unique_vals, counts = np.unique(batch_pred, return_counts=True)
-                    pred_label = unique_vals[counts.argmax()]
-
-                if label[batch] == pred_label:
-                    file_dir = os.path.join(result_path, f"correct/Label_{cls}")
-                else:
-                    file_dir = os.path.join(result_path, f"wrong/Label_{cls}")
-                os.makedirs(file_dir, exist_ok=True)
-                np.savetxt(os.path.join(file_dir, f"Batch_{batch_file.batch_num}.txt"), pred[batch], fmt='%d')
+    return acc, avg_rate
 
 
 def main():
@@ -201,12 +166,23 @@ def main():
                                   track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     val_dataset = dataset.RDMap(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
                                 track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=dataset.collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=dataset.collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+                              collate_fn=dataset.RDMap.collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                            collate_fn=dataset.RDMap.collate_fn)
 
     if result_path:
         config.check_paths(result_path)
-        test(model, train_loader, val_loader, device, threshold, track_seq_len, result_path, use_flash_attn)
+
+        print("Start Testing on Train Set...")
+        train_acc, train_avg_rate = test(model, train_loader, device, track_seq_len, result_path, use_flash_attn)
+        print(f"Train Accuracy: {train_acc}\n"
+              f"Train Average Rate: {train_avg_rate}")
+
+        print("Start Testing on Validation Set...")
+        val_acc, val_avg_rate = test(model, val_loader, device, track_seq_len, result_path, use_flash_attn)
+        print(f"Validation Accuracy: {val_acc}\n"
+              f"Validation Average Rate: {val_avg_rate}")
     else:
         raise ValueError("No result path specified")
 

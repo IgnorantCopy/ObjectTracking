@@ -38,7 +38,6 @@ train:
   num_classes: 6
   channels: 1
   alpha: 0.5
-  threshold: 0.5
   lr_scheduler:
     name: ReduceLROnPlateau
     factor: 0.5

@@ -289,7 +289,15 @@ class RDMap(Dataset):
         stacked_missing_rate = torch.from_numpy(np.stack(stacked_missing_rate, axis=0))
         image_masks = torch.from_numpy(np.stack(image_masks, axis=0))
         labels = torch.tensor(labels, dtype=torch.long)
-        return batch_files, point_indices, stacked_images, stacked_extra_features, stacked_missing_rate, image_masks, labels
+        return {
+            "batch_files": batch_files,
+            "point_indices": point_indices,
+            "images": stacked_images,
+            "extra_features": stacked_extra_features,
+            "missing_rate": stacked_missing_rate,
+            "image_masks": image_masks,
+            "labels": labels,
+        }
 
 
 if __name__ == '__main__':

@@ -8,11 +8,11 @@ conda create -n nju_dbw python=3.12 -y
 ```
 2. 安装相应 cuda 版本的 pytorch
 ```shell
-pip install torch torchvision torchaudio -f https://mirrors.aliyun.com/pytorch-wheels/cu128
+pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu128
 ```
 3. 安装其他依赖包
 ```shell
-pip install -r requirements.txt
+pip install -r requirement.txt
 ```
 
 也可通过 ____ 下载打包好的 conda 环境：
