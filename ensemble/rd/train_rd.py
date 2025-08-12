@@ -13,7 +13,7 @@ from torchvision import transforms
 import multiprocessing
 
 from ensemble.utils import config
-from data import dataset
+from ensemble.rd.data import dataset
 from ensemble.utils.logger import Logger
 
 

@@ -16,7 +16,7 @@ import os
 from tqdm import tqdm
 
 from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingTrainer
-from data_loader import TrajectoryDataLoader
+from ensemble.track.data_loader import TrajectoryDataLoader
 from ensemble.track.configs.streaming_config import StreamingConfig
 
 

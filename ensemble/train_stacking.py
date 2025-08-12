@@ -10,11 +10,11 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import multiprocessing
 
-from utils import config
-from data import dataset
-from utils.logger import Logger
-from models.stacking import Stacking
-from rd.data.dataset import split_train_val
+from ensemble.utils import config
+from ensemble.data import dataset
+from ensemble.utils.logger import Logger
+from ensemble.models.stacking import Stacking
+from ensemble.rd.data.dataset import split_train_val
 
 
 def config_parser():

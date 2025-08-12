@@ -22,7 +22,7 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from tqdm import tqdm
 
 from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingInferenceEngine
-from data_loader import TrajectoryDataLoader
+from ensemble.track.data_loader import TrajectoryDataLoader
 from ensemble.track.configs.config import TRACK_COLUMNS, SEQ_LEN, DATA_ROOT
 
 

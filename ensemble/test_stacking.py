@@ -9,11 +9,11 @@ import torch
 from torch.utils.data import DataLoader
 import multiprocessing
 
-from utils import config
-from data import dataset
-from utils.logger import Logger
-from models.stacking import Stacking, InferenceEngine
-from rd.data.dataset import split_train_val
+from ensemble.utils import config
+from ensemble.data import dataset
+from ensemble.utils.logger import Logger
+from ensemble.models.stacking import Stacking, InferenceEngine
+from ensemble.rd.data.dataset import split_train_val
 
 
 def config_parser():
@@ -211,10 +211,10 @@ def main():
 
     _, val_transform = config.get_transform(image_channels, height, width)
 
-    _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, True)
+    _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, False)
 
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                       track_seq_len=track_seq_len, test=True)
+                                       track_seq_len=track_seq_len, test=False)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                             collate_fn=dataset.FusedDataset.collate_fn)
 

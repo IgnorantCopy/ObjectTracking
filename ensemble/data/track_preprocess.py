@@ -4,7 +4,6 @@ import glob
 import numpy as np
 import pandas as pd
 import polars as pl
-from scipy import interpolate
 from scipy.stats import zscore
 from tqdm import tqdm
 

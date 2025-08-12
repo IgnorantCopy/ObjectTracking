@@ -8,7 +8,7 @@ from tsai.models.MultiRocketPlus import MultiRocketBackbonePlus
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 
-from ..data.preprocessor import TrajectoryPreprocessor
+from ensemble.track.data.preprocessor import TrajectoryPreprocessor
 
 class MultiRocket(nn.Module):
     def __init__(self, c_in: int,
