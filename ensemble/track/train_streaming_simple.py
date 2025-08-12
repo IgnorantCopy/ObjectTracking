@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 添加项目根目录到路径
 current_dir = Path(__file__)
-project_root = current_dir.parent  # 回到项目根目录
+project_root = current_dir.parent.parent  # 回到项目根目录
 sys.path.append(str(project_root))
 
 import torch

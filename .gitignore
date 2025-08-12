@@ -187,3 +187,4 @@ ensemble/ckpt/
 ensemble/track/checkpoints/
 ensemble/rd/logs/
 ensemble/checkpoints/
+*.tar.gz

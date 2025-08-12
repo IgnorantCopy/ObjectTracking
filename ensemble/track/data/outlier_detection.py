@@ -84,18 +84,19 @@ class OutlierDetector:
             prior_indices = indices[:i]
             prior_valid_mask = ~outlier_mask.iloc[prior_indices]
             prior_valid_indices = prior_indices[prior_valid_mask]
-            
-            # 如果之前没有足够的有效点，尝试使用全局有效点的均值
+
+            # 如果之前没有足够的有效点，尝试使用历史有效点的均值
             if len(prior_valid_indices) < 2:
-                all_valid_indices = indices[~outlier_mask]
-                if len(all_valid_indices) >= 1:
-                    fill_value = series.iloc[all_valid_indices].mean()
+                # 只使用当前点之前的有效数据
+                prior_all_valid = indices[:i][~outlier_mask.iloc[:i]]
+                if len(prior_all_valid) >= 1:
+                    fill_value = series.iloc[prior_all_valid].mean()
                     if pd.isna(fill_value):
                         fill_value = 0
                     series_copy.iloc[i] = fill_value
                 else:
                     series_copy.iloc[i] = 0
-                continue
+                    continue
             
             # 获取之前的有效点的数据
             x_prior = prior_valid_indices

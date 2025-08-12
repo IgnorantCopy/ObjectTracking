@@ -133,7 +133,6 @@ def main():
     lr               = train_config['lr']
     num_classes      = train_config['num_classes']
     channels         = train_config['channels']
-    threshold        = train_config['threshold']
     height           = train_config['height']
     width            = train_config['width']
     lr_config        = train_config['lr_scheduler']
