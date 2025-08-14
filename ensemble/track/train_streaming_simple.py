@@ -66,7 +66,6 @@ def train_and_evaluate_streaming_model(config: StreamingConfig, data_loader: Tra
         c_in=data_info['num_features'],
         c_out=num_classes,
         max_seq_len=seq_len,
-        # min_seq_len=config.min_seq_len,
         num_features=config.num_features,
         dropout=config.dropout,
         confidence_threshold=config.confidence_threshold
@@ -252,7 +251,8 @@ def train_and_evaluate_streaming_model(config: StreamingConfig, data_loader: Tra
         'val_accuracy': best_val_acc,
         'config': config,
         'data_info': data_info,
-    }, os.path.join(save_dir, f'best_streaming_model.pth'))
+    }, os.path.join(save_dir, 'best_streaming_model.pth'))
+    torch.save(model.state_dict(), os.path.join(save_dir, 'model_state_dict.pth'))
 
     return best_val_acc
 

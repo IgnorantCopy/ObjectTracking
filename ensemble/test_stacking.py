@@ -189,34 +189,31 @@ def main():
 
     rd_model = config.get_rd_model(rd_model_config, image_channels, num_classes)
     if rd_model_path:
-        checkpoint = torch.load(rd_model_path, weights_only=False)
-        rd_model.load_state_dict(checkpoint['state_dict'])
+        rd_model.load_state_dict(torch.load(rd_model_path))
         logger.log(f"Loaded checkpoint from {rd_model_path}")
     rd_model.to(device)
 
     track_model = config.get_track_model(track_model_config, track_channels, num_classes, track_seq_len)
     if track_model_path:
-        checkpoint = torch.load(track_model_path, weights_only=False)
-        track_model.load_state_dict(checkpoint['model_state_dict'])
+        track_model.load_state_dict(torch.load(track_model_path))
         logger.log(f"Loaded checkpoint from {track_model_path}")
     track_model.to(device)
 
     model = Stacking([rd_model], [track_model], num_classes)
 
     if stacking:
-        checkpoint = torch.load(stacking, weights_only=False)
-        model.load_state_dict(checkpoint['state_dict'])
+        model.load_state_dict(torch.load(stacking))
         logger.log(f"Loaded checkpoint from {stacking}")
     model.to(device)
 
-    _, val_transform = config.get_transform(image_channels, height, width)
+    train_transform, val_transform = config.get_transform(image_channels, height, width)
 
-    _, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, False)
+    train_batch_files, val_batch_files = split_train_val(data_root, num_classes, val_ratio, shuffle, True)
 
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                       track_seq_len=track_seq_len, test=False)
+                                       track_seq_len=track_seq_len, test=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                            collate_fn=dataset.FusedDataset.collate_fn)
+                            collate_fn=dataset.FusedDataset.collate_fn_test)
 
     logger.log('-' * 50)
 

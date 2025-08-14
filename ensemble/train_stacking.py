@@ -61,7 +61,7 @@ def train(model, train_loader, optimizer, criterion, device, num_classes, track_
         begin_times = [track_seq_len for _ in range(len(image))]
         pred = []
         begin = [False for _ in range(len(image))]
-        last_logits = torch.ones((len(image), num_classes), dtype=torch.float32, device=device) / num_classes
+        last_logits = torch.ones((len(track_features), num_classes), dtype=torch.float32, device=device) / num_classes
         for t in range(1, track_seq_len + 1):
             index_mask_t = (point_index <= t)
             image_mask_t = image_mask * index_mask_t
@@ -373,8 +373,7 @@ def main():
 
     rd_model = config.get_rd_model(rd_model_config, image_channels, num_classes)
     if rd_model_path:
-        checkpoint = torch.load(rd_model_path, weights_only=False)
-        rd_model.load_state_dict(checkpoint['state_dict'])
+        rd_model.load_state_dict(torch.load(rd_model_path))
         logger.log(f"Loaded checkpoint from {rd_model_path}")
     if use_flash_attn:
         rd_model.half()
@@ -382,8 +381,7 @@ def main():
 
     track_model = config.get_track_model(track_model_config, track_channels, num_classes, track_seq_len)
     if track_model_path:
-        checkpoint = torch.load(track_model_path, weights_only=False)
-        track_model.load_state_dict(checkpoint['model_state_dict'])
+        track_model.load_state_dict(torch.load(track_model_path))
         logger.log(f"Loaded checkpoint from {track_model_path}")
     track_model.to(device)
 
@@ -416,9 +414,9 @@ def main():
     val_dataset = dataset.FusedDataset(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
                                        track_seq_len=track_seq_len)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
-                              collate_fn=dataset.FusedDataset.collate_fn)
+                              collate_fn=dataset.FusedDataset.collate_fn_train)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                            collate_fn=dataset.FusedDataset.collate_fn)
+                            collate_fn=dataset.FusedDataset.collate_fn_train)
 
 
     for epoch in range(start_epoch, epochs):
@@ -462,6 +460,7 @@ def main():
         if val_acc > best_acc:
             best_acc = val_acc
             save_model(model, optimizer, lr_scheduler, epoch, best_acc, os.path.join(log_path, "best.pth"))
+            torch.save(model.state_dict(), os.path.join(log_path, "model_state_dict.pth"))
             logger.log(f"Best model saved with acc: {best_acc:.3f}")
         save_model(model, optimizer, lr_scheduler, epoch, best_acc, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)

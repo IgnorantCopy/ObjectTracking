@@ -360,9 +360,8 @@ def main():
     elif phase == "train":
         if not pretrain:
             raise ValueError("Pretrain model is not provided.")
-        pretrain_checkpoint = torch.load(pretrain)
         model = config.get_rd_model(model_config, channels, num_classes - 2)
-        model.load_state_dict(pretrain_checkpoint['state_dict'])
+        model.load_state_dict(torch.load(pretrain))
         model.head = nn.Linear(model.head.in_features, num_classes)
     else:
         raise ValueError("Invalid phase.")
@@ -441,6 +440,7 @@ def main():
         if val_acc > best_acc:
             best_acc = val_acc
             save_model(model, optimizer, lr_scheduler, epoch, best_acc, os.path.join(log_path, "best.pth"))
+            torch.save(model.state_dict(), os.path.join(log_path, "model_state_dict.pth"))
             logger.log(f"Best model saved with acc: {best_acc:.3f}")
         save_model(model, optimizer, lr_scheduler, epoch, best_acc, os.path.join(log_path, "latest.pth"))
         writer.add_scalar("lr", optimizer.param_groups[0]['lr'], epoch)

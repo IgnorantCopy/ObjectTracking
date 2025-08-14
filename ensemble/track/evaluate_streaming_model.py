@@ -24,10 +24,13 @@ from tqdm import tqdm
 from ensemble.track.models.streaming_multi_rocket import StreamingMultiRocketClassifier, StreamingInferenceEngine
 from ensemble.track.data_loader import TrajectoryDataLoader
 from ensemble.track.configs.config import TRACK_COLUMNS, SEQ_LEN, DATA_ROOT
+from ensemble.track.configs.streaming_config import StreamingConfig
 
 
-def load_trained_model(checkpoint_path: str, device: str = 'auto'):
+def load_trained_model(checkpoint_path: str, config: StreamingConfig, data_info: Dict[str, Any]):
     """加载训练好的模型"""
+    device = config.device
+
     if device == 'auto':
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     elif device == 'cpu':
@@ -41,32 +44,26 @@ def load_trained_model(checkpoint_path: str, device: str = 'auto'):
     
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"模型文件不存在: {checkpoint_path}")
-    
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # 重建模型
-    data_info = checkpoint['data_info']
-    config = checkpoint.get('config')
-    
+
     model = StreamingMultiRocketClassifier(
         c_in=data_info['num_features'],
         c_out=data_info['num_classes'],
         max_seq_len=data_info['seq_len'],
-        num_features=getattr(config, 'num_features', 10_000),
-        dropout=getattr(config, 'dropout', 0.2),
-        # confidence_threshold=getattr(config, 'confidence_threshold', 0.9)
-        confidence_threshold=0.95
-    ).to(device)
+        num_features=config.num_features,
+        dropout=config.dropout,
+        confidence_threshold=config.confidence_threshold
+    )
     
     # 加载权重
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(torch.load(checkpoint_path))
+    model.to(device)
     model.eval()
     
     print(f"✅ 模型加载成功")
     print(f"   支持的序列长度: {model.supported_lengths}")
     print(f"   数据信息: {data_info}")
     
-    return model, checkpoint, device
+    return model, device
 
 
 def evaluate_streaming(model, data_loader, device, detailed_analysis=True):
@@ -220,23 +217,27 @@ def comprehensive_model_evaluation(checkpoint_path: str):
     """综合模型评估"""
     print("🔍 综合模型评估")
     print("=" * 60)
-    
-    # 加载模型
-    device = 'auto'
-    model, checkpoint, device = load_trained_model(checkpoint_path, device)
-    
+
+    config = StreamingConfig()
+
     # 加载数据
     print("\n加载测试数据...")
     data_loader = TrajectoryDataLoader(
-        batch_size=64,
+        batch_size=config.batch_size,
         shuffle=False,
         num_workers=4,
+        train_split=config.train_split,
+        val_split=config.val_split,
+        test_split=config.test_split,
         test_only=False,
         random_state=42,
     )
 
     _, _, test_loader = data_loader.get_dataloaders()
-    
+    data_info = data_loader.data_info
+
+    model, device = load_trained_model(checkpoint_path, config, data_info)
+
     # 进行综合评估
     evaluation_results = evaluate_streaming(model, test_loader, device, detailed_analysis=False)
     
@@ -249,7 +250,7 @@ def main():
     print("=" * 60)
     
     # 检查文件
-    checkpoint_path = "../checkpoints/best_streaming_model.pth"
+    checkpoint_path = "./checkpoints/model_state_dict.pth"
 
     if not os.path.exists(checkpoint_path):
         print(f"❌ 模型文件不存在: {checkpoint_path}")

@@ -15,7 +15,7 @@ pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 -f https://mirror
 pip install -r requirement.txt
 ```
 
-也可通过 ____ 下载打包好的 conda 环境：
+也可通过百度网盘下载打包好的 conda 环境：
 
 ## 2. 训练
 
@@ -37,7 +37,23 @@ python train_stacking.py --config-path ./configs/fusion.yaml --log-path ./logs -
 ```
 需要修改 `configs/fusion.yaml` 中的 `data_root` 路径为包含有点迹、航迹、原始回波文件夹的根目录。
 ## 3. 推理
+
+> 推荐使用 PyCharm 打开本项目
+
 ```shell
 python test_stacking.py --config-path ./configs/fusion.yaml --log-path ./logs --device cuda --rd-model <path_to_your_rd_model> --track-model <path_to_your_track_model> --stacking <path_to_your_stacking_model> --result-path <path_to_save_results>
 ```
-需要修改 `configs/fusion.yaml` 中的 `data_root` 路径为包含有点迹、航迹、原始回波文件夹的根目录。
+需要修改 `configs/fusion.yaml` 中的 `data_root` 路径为包含有点迹、航迹、原始回波文件夹的根目录：
+
+<img src="assets/data_root.png">
+
+对于提交的 ensemble 文件，可以在可视化界面中输入参数 `--rd-model ./ckpt/rd_models/20250814-205526/model_state_dict.pth --track-model ./ckpt/track_models/multi_rocket/model_state_dict.pth --stacking ./ckpt/stacking_models/20250814-223003/model_state_dict.pth
+--result-path <保存航迹结果文件的路径>`，具体如下图所示：
+
+1. 打开参数编辑界面：
+
+<img src="assets/step1.png">
+
+2. 在对应位置输入参数：
+
+<img src="assets/step2.png">

@@ -116,14 +116,14 @@ class TrajectoryDataLoader:
         print(f"  类别分布: {self.data_info['class_distribution']}")
         
         # 数据分割
-        if self.test_only:
-            print(f"\n测试模式，不进行数据分割")
-            print(f"  测试集: {len(sequences)} 样本")
+        if self.test_only or self.val_split == 0.0:
+            print(f"  总样本: {len(sequences)}")
+
             self.test_dataset = TrajectoryDataset(sequences, labels, batch_ids, num_points)
             self.test_loader = DataLoader(
                 self.test_dataset,
                 batch_size=self.batch_size,
-                shuffle=False,
+                shuffle=self.shuffle,
                 num_workers=self.num_workers,
                 pin_memory=torch.cuda.is_available()
             )

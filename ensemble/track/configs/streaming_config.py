@@ -12,7 +12,7 @@ class StreamingConfig:
     # min_seq_len: int = 10  # 最小序列长度
     num_features: int = 10_000  # 特征数
     dropout: float = 0.2  # dropout概率
-    confidence_threshold: float = 0.9  # 置信度阈值
+    confidence_threshold: float = 0.95  # 置信度阈值
     
     # 训练参数
     batch_size: int = 64

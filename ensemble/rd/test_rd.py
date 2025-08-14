@@ -130,29 +130,17 @@ def main():
 
     batch_size       = train_config['batch_size']
     num_workers      = train_config['num_workers']
-    lr               = train_config['lr']
     num_classes      = train_config['num_classes']
     channels         = train_config['channels']
     height           = train_config['height']
     width            = train_config['width']
-    lr_config        = train_config['lr_scheduler']
-    optimizer_config = train_config['optimizer']
 
 
     num_classes -= 2    # exclude noise and unknown class
     model = config.get_rd_model(model_config, channels, num_classes)
 
-    optimizer = config.get_optimizer(optimizer_config, model, lr)
-    lr_scheduler = config.get_lr_scheduler(lr_config, optimizer)
     if resume:
-        checkpoint = torch.load(resume)
-        model.load_state_dict(checkpoint['state_dict'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        for state in optimizer.state.values():
-            for k, v in state.items():
-                if torch.is_tensor(v) and device == "cuda":
-                    state[k] = v.cuda()
+        model.load_state_dict(torch.load(resume))
     else:
         raise ValueError(f"No checkpoint found at '{resume}'")
     if use_flash_attn:
@@ -163,12 +151,12 @@ def main():
     train_batch_files, val_batch_files = dataset.split_train_val(data_root, num_classes, val_ratio, shuffle)
     train_dataset = dataset.RDMap(train_batch_files, image_transform=train_transform, image_seq_len=image_seq_len,
                                   track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
-    val_dataset = dataset.RDMap(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
-                                track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
+    # val_dataset = dataset.RDMap(val_batch_files, image_transform=val_transform, image_seq_len=image_seq_len,
+    #                             track_seq_len=track_seq_len, track_transform=transforms.ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
                               collate_fn=dataset.RDMap.collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                            collate_fn=dataset.RDMap.collate_fn)
+    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+    #                         collate_fn=dataset.RDMap.collate_fn)
 
     if result_path:
         config.check_paths(result_path)
@@ -178,10 +166,10 @@ def main():
         print(f"Train Accuracy: {train_acc}\n"
               f"Train Average Rate: {train_avg_rate}")
 
-        print("Start Testing on Validation Set...")
-        val_acc, val_avg_rate = test(model, val_loader, device, track_seq_len, result_path, use_flash_attn)
-        print(f"Validation Accuracy: {val_acc}\n"
-              f"Validation Average Rate: {val_avg_rate}")
+        # print("Start Testing on Validation Set...")
+        # val_acc, val_avg_rate = test(model, val_loader, device, track_seq_len, result_path, use_flash_attn)
+        # print(f"Validation Accuracy: {val_acc}\n"
+        #       f"Validation Average Rate: {val_avg_rate}")
     else:
         raise ValueError("No result path specified")
 
